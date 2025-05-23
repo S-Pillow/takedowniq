@@ -602,7 +602,7 @@ async def chatgpt_impact(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.post("/upload", response_model=AnalysisResponse)
+@app.post("/api/upload", response_model=AnalysisResponse)
 async def upload_file(
     file: UploadFile = File(...),
     domain: str = Form(...),
@@ -679,7 +679,7 @@ async def upload_file(
         logger.error(f"Error analyzing domain: {e}")
         raise HTTPException(status_code=500, detail=f"Error analyzing domain: {str(e)}")
 
-@app.get("/analysis/{upload_id}", response_model=AnalysisResponse)
+@app.get("/api/analysis/{upload_id}", response_model=AnalysisResponse)
 async def get_analysis(upload_id: str):
     """Get analysis results for a specific upload ID."""
     if upload_id not in active_sessions:
