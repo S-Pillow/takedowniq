@@ -2,7 +2,7 @@ import os
 import uuid
 import tempfile
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
@@ -118,23 +118,271 @@ class ReportResponse(BaseModel):
 
 # Helper functions
 def get_whois_data(domain: str) -> Dict[str, Any]:
-    """Get WHOIS information for a domain."""
+    """
+    Get domain registration information using RDAP first, then falling back to WHOIS.
+    Returns registrar, creation date, expiration date, domain age, and status.
+    """
+    import rdap
+    from datetime import datetime, timezone
+    import re
+    
+    # Initialize result with default values
+    result = {
+        "registrar": "Unknown",
+        "creation_date": "Unknown",
+        "expiration_date": "Unknown",
+        "domain_age": "Unknown",
+        "status": "Unknown",
+        "whois_privacy": "Unknown",
+        "name_servers": [],
+        "method_used": None  # Track which method was used for debugging
+    }
+    
+    # Helper function to safely convert any date to string format
+    def format_date_safely(date_value):
+        if date_value is None or date_value == "Unknown":
+            return "Unknown"
+        
+        if isinstance(date_value, datetime):
+            try:
+                return date_value.strftime("%Y-%m-%d")
+            except Exception as e:
+                logger.warning(f"Error formatting datetime: {e}")
+                return "Unknown"
+        elif isinstance(date_value, str):
+            return date_value
+        else:
+            try:
+                return str(date_value)
+            except Exception:
+                return "Unknown"
+                
+    # Helper function to clean up domain status values
+    def clean_domain_status(status_values):
+        if not status_values:
+            return []
+            
+        # Convert to list if it's not already
+        if not isinstance(status_values, list):
+            status_values = [status_values]
+            
+        # Clean up each status value
+        cleaned_statuses = []
+        for status in status_values:
+            if not status:
+                continue
+                
+            # Extract just the status code without URLs
+            if isinstance(status, str):
+                # Remove URLs and parentheses
+                status = status.split(' http')[0].split(' (http')[0].strip()
+                if status and status not in cleaned_statuses:
+                    cleaned_statuses.append(status)
+                    
+        return cleaned_statuses
+    
+    # Helper function to safely calculate domain age
+    def calculate_domain_age(date_value):
+        if date_value is None or date_value == "Unknown":
+            return "Unknown"
+        
+        try:
+            # Convert to datetime if it's a string
+            if isinstance(date_value, str):
+                # Skip if it's already "Unknown"
+                if date_value == "Unknown":
+                    return "Unknown"
+                    
+                # Try to parse the date string with multiple formats
+                formats = [
+                    "%Y-%m-%d",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%SZ",
+                    "%Y-%m-%d %H:%M:%S",
+                ]
+                
+                parsed_date = None
+                for fmt in formats:
+                    try:
+                        parsed_date = datetime.strptime(date_value, fmt)
+                        break
+                    except ValueError:
+                        continue
+                
+                if parsed_date is None:
+                    logger.warning(f"Could not parse date string: {date_value}")
+                    return "Unknown"
+                    
+                date_value = parsed_date
+            
+            # Ensure we have a datetime object
+            if not isinstance(date_value, datetime):
+                logger.warning(f"Date value is not a datetime object: {type(date_value)}")
+                return "Unknown"
+            
+            # Ensure the datetime is timezone-aware
+            if date_value.tzinfo is None:
+                date_value = date_value.replace(tzinfo=timezone.utc)
+            
+            # Calculate age
+            now = datetime.now(timezone.utc)
+            delta = now - date_value
+            years = delta.days // 365
+            months = (delta.days % 365) // 30
+            
+            if years > 0:
+                age_str = f"{years} year{'s' if years != 1 else ''}"
+                if months > 0:
+                    age_str += f", {months} month{'s' if months != 1 else ''}"
+                return age_str
+            else:
+                if months > 0:
+                    return f"{months} month{'s' if months != 1 else ''}"
+                else:
+                    days = delta.days
+                    return f"{days} day{'s' if days != 1 else ''}"
+        except Exception as e:
+            logger.warning(f"Error calculating domain age: {e}")
+            return "Unknown"
+    
+    # Clean the domain (remove protocol and path)
     try:
-        w = whois.whois(domain)
-        return {
-            "registrar": w.registrar,
-            "creation_date": w.creation_date[0] if isinstance(w.creation_date, list) else w.creation_date,
-            "expiration_date": w.expiration_date[0] if isinstance(w.expiration_date, list) else w.expiration_date,
-            "updated_date": w.updated_date[0] if isinstance(w.updated_date, list) else w.updated_date,
-            "name_servers": w.name_servers,
-            "status": w.status,
-            "emails": w.emails,
-            "dnssec": w.dnssec,
-            "country": w.country,
-        }
+        domain = re.sub(r'^https?://', '', domain)
+        domain = domain.split('/')[0]
     except Exception as e:
-        logger.error(f"Error getting WHOIS data: {e}")
-        return {"error": str(e)}
+        logger.error(f"Error cleaning domain: {e}")
+    
+    # Try RDAP first
+    rdap_success = False
+    try:
+        logger.info(f"Attempting RDAP lookup for {domain}")
+        client = rdap.client.RdapClient()
+        rdap_data = client.get_domain(domain)
+        
+        # Extract registrar
+        try:
+            if hasattr(rdap_data, 'entities') and rdap_data.entities:
+                for entity in rdap_data.entities:
+                    if entity.role and 'registrar' in entity.role:
+                        result["registrar"] = entity.name
+                        break
+        except Exception as e:
+            logger.warning(f"Error extracting registrar from RDAP: {e}")
+        
+        # Extract dates
+        try:
+            if hasattr(rdap_data, 'events') and rdap_data.events:
+                for event in rdap_data.events:
+                    if event.action == 'registration':
+                        result["creation_date"] = event.date
+                    elif event.action == 'expiration':
+                        result["expiration_date"] = event.date
+        except Exception as e:
+            logger.warning(f"Error extracting dates from RDAP: {e}")
+        
+        # Extract status
+        try:
+            if hasattr(rdap_data, 'status') and rdap_data.status:
+                result["status"] = clean_domain_status(rdap_data.status)
+        except Exception as e:
+            logger.warning(f"Error extracting status from RDAP: {e}")
+        
+        # Extract nameservers
+        try:
+            if hasattr(rdap_data, 'nameservers') and rdap_data.nameservers:
+                result["name_servers"] = [ns.name for ns in rdap_data.nameservers]
+        except Exception as e:
+            logger.warning(f"Error extracting nameservers from RDAP: {e}")
+        
+        # Check WHOIS privacy
+        try:
+            result["whois_privacy"] = "Enabled" if not result["registrar"] or "privacy" in result["registrar"].lower() else "Disabled"
+        except Exception as e:
+            logger.warning(f"Error determining WHOIS privacy from RDAP: {e}")
+        
+        result["method_used"] = "RDAP"
+        rdap_success = True
+        logger.info(f"Successfully retrieved RDAP data for {domain}")
+        
+    except Exception as rdap_error:
+        logger.warning(f"RDAP lookup failed for {domain}: {rdap_error}. Falling back to WHOIS.")
+    
+    # Fall back to WHOIS if RDAP failed
+    if not rdap_success:
+        try:
+            w = whois.whois(domain)
+            
+            # Extract registrar
+            try:
+                if hasattr(w, 'registrar') and w.registrar:
+                    result["registrar"] = w.registrar
+            except Exception as e:
+                logger.warning(f"Error extracting registrar from WHOIS: {e}")
+            
+            # Extract creation date
+            try:
+                if hasattr(w, 'creation_date') and w.creation_date:
+                    if isinstance(w.creation_date, list):
+                        result["creation_date"] = w.creation_date[0]
+                    else:
+                        result["creation_date"] = w.creation_date
+            except Exception as e:
+                logger.warning(f"Error extracting creation date from WHOIS: {e}")
+            
+            # Extract expiration date
+            try:
+                if hasattr(w, 'expiration_date') and w.expiration_date:
+                    if isinstance(w.expiration_date, list):
+                        result["expiration_date"] = w.expiration_date[0]
+                    else:
+                        result["expiration_date"] = w.expiration_date
+            except Exception as e:
+                logger.warning(f"Error extracting expiration date from WHOIS: {e}")
+            
+            # Extract status
+            try:
+                if hasattr(w, 'status') and w.status:
+                    result["status"] = clean_domain_status(w.status)
+            except Exception as e:
+                logger.warning(f"Error extracting status from WHOIS: {e}")
+            
+            # Extract nameservers
+            try:
+                if hasattr(w, 'name_servers') and w.name_servers:
+                    result["name_servers"] = w.name_servers
+            except Exception as e:
+                logger.warning(f"Error extracting nameservers from WHOIS: {e}")
+            
+            # Check WHOIS privacy
+            try:
+                has_emails = hasattr(w, 'emails') and w.emails
+                has_privacy_registrar = hasattr(w, 'registrar') and w.registrar and "privacy" in str(w.registrar).lower()
+                result["whois_privacy"] = "Enabled" if not has_emails or has_privacy_registrar else "Disabled"
+            except Exception as e:
+                logger.warning(f"Error determining WHOIS privacy from WHOIS: {e}")
+            
+            result["method_used"] = "WHOIS"
+            logger.info(f"Successfully retrieved WHOIS data for {domain}")
+            
+        except Exception as whois_error:
+            logger.error(f"Both RDAP and WHOIS lookups failed for {domain}. RDAP error: {rdap_error if 'rdap_error' in locals() else 'Unknown'}. WHOIS error: {whois_error}")
+            result["error"] = f"Domain information lookup failed: {str(whois_error)}"
+    
+    # Format dates and calculate domain age
+    try:
+        # Format creation date
+        result["creation_date"] = format_date_safely(result["creation_date"])
+        
+        # Format expiration date
+        result["expiration_date"] = format_date_safely(result["expiration_date"])
+        
+        # Calculate domain age based on creation date
+        if result["creation_date"] and result["creation_date"] != "Unknown":
+            result["domain_age"] = calculate_domain_age(result["creation_date"])
+    except Exception as e:
+        logger.error(f"Error formatting dates or calculating domain age: {e}")
+    
+    return result
 
 def get_dns_records(domain: str) -> Dict[str, Any]:
     """Get DNS records for a domain."""
@@ -262,20 +510,72 @@ def calculate_risk_score(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
     whois_data = analysis_data.get("whois_data", {})
     if whois_data and not whois_data.get("error"):
         creation_date = whois_data.get("creation_date")
-        if creation_date:
-            domain_age_days = (datetime.now() - creation_date).days if isinstance(creation_date, datetime) else 365
-            if domain_age_days < 30:
-                score += 30
-                risk_factors.append({
-                    "description": f"Domain was registered recently ({domain_age_days} days ago)",
-                    "severity": "high"
-                })
-            elif domain_age_days < 90:
-                score += 15
-                risk_factors.append({
-                    "description": f"Domain is relatively new ({domain_age_days} days old)",
-                    "severity": "medium"
-                })
+        domain_age_days = 365  # Default to 1 year if we can't calculate
+        
+        # Try to use domain_age if it's already calculated
+        domain_age = whois_data.get("domain_age")
+        if domain_age and domain_age != "Unknown":
+            # If we have a calculated age string like "2 years, 3 months" or "5 days"
+            # we can extract the approximate age in days
+            try:
+                if "year" in domain_age:
+                    years = int(domain_age.split(" ")[0])
+                    domain_age_days = years * 365
+                    if "month" in domain_age:
+                        months_str = domain_age.split(",")[1].strip()
+                        months = int(months_str.split(" ")[0])
+                        domain_age_days += months * 30
+                elif "month" in domain_age:
+                    months = int(domain_age.split(" ")[0])
+                    domain_age_days = months * 30
+                elif "day" in domain_age:
+                    domain_age_days = int(domain_age.split(" ")[0])
+            except Exception as e:
+                logger.warning(f"Error parsing domain_age string: {e}")
+        # If we couldn't parse domain_age, try to calculate from creation_date
+        elif creation_date and creation_date != "Unknown":
+            try:
+                # If creation_date is a datetime object
+                if isinstance(creation_date, datetime):
+                    domain_age_days = (datetime.now(timezone.utc) - creation_date).days
+                # If creation_date is a string, try to parse it
+                elif isinstance(creation_date, str):
+                    # Try common date formats
+                    formats = [
+                        "%Y-%m-%d",
+                        "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%dT%H:%M:%SZ",
+                        "%Y-%m-%d %H:%M:%S",
+                    ]
+                    parsed_date = None
+                    for fmt in formats:
+                        try:
+                            parsed_date = datetime.strptime(creation_date, fmt)
+                            break
+                        except ValueError:
+                            continue
+                    
+                    if parsed_date:
+                        # Make the parsed date timezone-aware
+                        if parsed_date.tzinfo is None:
+                            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                        domain_age_days = (datetime.now(timezone.utc) - parsed_date).days
+            except Exception as e:
+                logger.warning(f"Error calculating domain age days: {e}")
+        
+        # Apply risk scoring based on domain age
+        if domain_age_days < 30:
+            score += 30
+            risk_factors.append({
+                "description": f"Domain was registered recently ({domain_age_days} days ago)",
+                "severity": "high"
+            })
+        elif domain_age_days < 90:
+            score += 15
+            risk_factors.append({
+                "description": f"Domain is relatively new ({domain_age_days} days old)",
+                "severity": "medium"
+            })
     
     # Check VirusTotal results
     vt_data = analysis_data.get("virustotal_data", {})
@@ -324,9 +624,40 @@ def generate_timeline(analysis_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Generate a timeline of events for the domain."""
     timeline = []
     
+    # Helper function to safely parse dates
+    def parse_date_safely(date_value):
+        if date_value is None or date_value == "Unknown":
+            return None
+            
+        if isinstance(date_value, datetime):
+            return date_value
+            
+        if isinstance(date_value, str):
+            try:
+                # Try common date formats
+                formats = [
+                    "%Y-%m-%d",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%SZ",
+                    "%Y-%m-%d %H:%M:%S",
+                ]
+                for fmt in formats:
+                    try:
+                        parsed_date = datetime.strptime(date_value, fmt)
+                        # Make the parsed date timezone-aware
+                        if parsed_date.tzinfo is None:
+                            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                        return parsed_date
+                    except ValueError:
+                        continue
+            except Exception as e:
+                logger.warning(f"Error parsing date string: {e}")
+                
+        return None
+    
     # Add analysis time
     timeline.append({
-        "timestamp": datetime.now(),
+        "timestamp": datetime.now(timezone.utc),
         "event": "Analysis Performed",
         "description": f"TakedownIQ analyzed the domain {analysis_data.get('domain')}"
     })
@@ -335,17 +666,21 @@ def generate_timeline(analysis_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     whois_data = analysis_data.get("whois_data", {})
     if whois_data and not whois_data.get("error"):
         creation_date = whois_data.get("creation_date")
-        if creation_date:
+        parsed_creation_date = parse_date_safely(creation_date)
+        
+        if parsed_creation_date:
             timeline.append({
-                "timestamp": creation_date,
+                "timestamp": parsed_creation_date,
                 "event": "Domain Registration",
                 "description": f"Domain was registered with {whois_data.get('registrar', 'Unknown Registrar')}"
             })
         
         updated_date = whois_data.get("updated_date")
-        if updated_date and updated_date != creation_date:
+        parsed_updated_date = parse_date_safely(updated_date)
+        
+        if parsed_updated_date and (not parsed_creation_date or parsed_updated_date != parsed_creation_date):
             timeline.append({
-                "timestamp": updated_date,
+                "timestamp": parsed_updated_date,
                 "event": "Domain Updated",
                 "description": "Domain registration was updated"
             })
@@ -355,15 +690,25 @@ def generate_timeline(analysis_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     if vt_data and not vt_data.get("error"):
         last_analysis_date = vt_data.get("last_analysis_date")
         if last_analysis_date:
-            scan_date = datetime.fromtimestamp(last_analysis_date)
-            timeline.append({
-                "timestamp": scan_date,
-                "event": "VirusTotal Scan",
-                "description": f"Domain was scanned by VirusTotal with {vt_data.get('malicious_count', 0)} detections"
-            })
+            try:
+                scan_date = datetime.fromtimestamp(last_analysis_date, tz=timezone.utc)
+                timeline.append({
+                    "timestamp": scan_date,
+                    "event": "VirusTotal Scan",
+                    "description": f"Domain was scanned by VirusTotal with {vt_data.get('malicious_count', 0)} detections"
+                })
+            except Exception as e:
+                logger.warning(f"Error parsing VirusTotal date: {e}")
+    
+    # Filter out any entries with None timestamps
+    timeline = [entry for entry in timeline if entry["timestamp"] is not None]
     
     # Sort timeline by timestamp
-    timeline.sort(key=lambda x: x["timestamp"])
+    if timeline:
+        try:
+            timeline.sort(key=lambda x: x["timestamp"])
+        except Exception as e:
+            logger.error(f"Error sorting timeline: {e}")
     
     return timeline
 

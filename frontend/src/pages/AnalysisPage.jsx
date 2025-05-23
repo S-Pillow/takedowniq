@@ -177,35 +177,58 @@ export default function AnalysisPage() {
                 <div>
                   <dt className="text-sm font-medium text-gray-500">Registration Date</dt>
                   <dd className="mt-1 text-sm text-gray-900">
-                    {analysis.whois?.creation_date || 'Unknown'}
+                    {(analysis.whois_data?.creation_date || analysis.whois?.creation_date || 'Unknown')}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-gray-500">Expiration Date</dt>
                   <dd className="mt-1 text-sm text-gray-900">
-                    {analysis.whois?.expiration_date || 'Unknown'}
+                    {(analysis.whois_data?.expiration_date || analysis.whois?.expiration_date || 'Unknown')}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-sm font-medium text-gray-500">Domain Age</dt>
+                  <dd className="mt-1 text-sm text-gray-900">
+                    {(analysis.whois_data?.domain_age || analysis.whois?.domain_age || 'Unknown')}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-gray-500">Registrar</dt>
                   <dd className="mt-1 text-sm text-gray-900">
-                    {analysis.whois?.registrar || 'Unknown'}
+                    {(analysis.whois_data?.registrar || analysis.whois?.registrar || 'Unknown')}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-sm font-medium text-gray-500">WHOIS Privacy</dt>
+                  <dt className="text-sm font-medium text-gray-500">Domain Status</dt>
                   <dd className="mt-1 text-sm text-gray-900">
-                    {analysis.whois?.privacy ? 'Enabled' : 'Disabled'}
+                    {Array.isArray(analysis.whois_data?.status) 
+                      ? (
+                          <ul className="list-none">
+                            {analysis.whois_data.status.map((status, index) => (
+                              <li key={`status-${index}`}>{status}</li>
+                            ))}
+                          </ul>
+                        )
+                      : (analysis.whois_data?.status || analysis.whois?.status || 'Unknown')}
                   </dd>
                 </div>
                 <div className="sm:col-span-2">
                   <dt className="text-sm font-medium text-gray-500">Name Servers</dt>
                   <dd className="mt-1 text-sm text-gray-900">
-                    {analysis.dns?.nameservers?.length > 0 ? (
+                    {(analysis.whois_data?.name_servers?.length > 0 || analysis.dns_data?.ns_records?.length > 0 || analysis.dns?.nameservers?.length > 0) ? (
                       <ul className="list-disc pl-5">
-                        {analysis.dns.nameservers.map((ns, index) => (
-                          <li key={index}>{ns}</li>
-                        ))}
+                        {analysis.whois_data?.name_servers ? 
+                          analysis.whois_data.name_servers.map((ns, index) => (
+                            <li key={`whois-${index}`}>{ns}</li>
+                          )) : 
+                          analysis.dns_data?.ns_records ? 
+                            analysis.dns_data.ns_records.map((ns, index) => (
+                              <li key={`dns-${index}`}>{ns}</li>
+                            )) :
+                            analysis.dns?.nameservers?.map((ns, index) => (
+                              <li key={`dns-old-${index}`}>{ns}</li>
+                            ))
+                        }
                       </ul>
                     ) : (
                       'None found'
@@ -215,69 +238,7 @@ export default function AnalysisPage() {
               </dl>
             </div>
 
-            {/* DNS Records */}
-            <div className="card">
-              <h2 className="text-xl font-semibold mb-4">DNS Records</h2>
-              {analysis.dns?.records?.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-300">
-                    <thead>
-                      <tr>
-                        <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Type</th>
-                        <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Name</th>
-                        <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Value</th>
-                        <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">TTL</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-200">
-                      {analysis.dns.records.map((record, index) => (
-                        <tr key={index}>
-                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-900">{record.type}</td>
-                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-900">{record.name}</td>
-                          <td className="px-3 py-4 text-sm text-gray-900 break-all">{record.value}</td>
-                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-900">{record.ttl}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-gray-500 text-sm">No DNS records found</p>
-              )}
-            </div>
-
-            {/* SSL Certificates */}
-            <div className="card">
-              <h2 className="text-xl font-semibold mb-4">SSL Certificates</h2>
-              {analysis.ssl?.certificates?.length > 0 ? (
-                <div className="space-y-4">
-                  {analysis.ssl.certificates.map((cert, index) => (
-                    <div key={index} className="border rounded-md p-4">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
-                        <div>
-                          <dt className="text-sm font-medium text-gray-500">Issuer</dt>
-                          <dd className="mt-1 text-sm text-gray-900">{cert.issuer}</dd>
-                        </div>
-                        <div>
-                          <dt className="text-sm font-medium text-gray-500">Valid From</dt>
-                          <dd className="mt-1 text-sm text-gray-900">{cert.valid_from}</dd>
-                        </div>
-                        <div>
-                          <dt className="text-sm font-medium text-gray-500">Valid To</dt>
-                          <dd className="mt-1 text-sm text-gray-900">{cert.valid_to}</dd>
-                        </div>
-                        <div>
-                          <dt className="text-sm font-medium text-gray-500">Serial Number</dt>
-                          <dd className="mt-1 text-sm text-gray-900 truncate">{cert.serial_number}</dd>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-gray-500 text-sm">No SSL certificates found</p>
-              )}
-            </div>
+            {/* VirusTotal Results section will be next */}
 
             {/* VirusTotal Results */}
             <div className="card">
