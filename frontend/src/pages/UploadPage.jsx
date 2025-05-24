@@ -1,78 +1,96 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { 
-  ArrowUpTrayIcon, 
-  CameraIcon, 
-  DocumentTextIcon, 
+import { useDropzone } from 'react-dropzone';
+import {
+  ArrowPathIcon,
+  ArrowUpTrayIcon,
+  DocumentTextIcon,
   XMarkIcon,
-  ArrowPathIcon
+  CameraIcon,
+  ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
 import ScreenshotTool from '../components/ScreenshotTool';
 
 export default function UploadPage() {
   const navigate = useNavigate();
-  const [domain, setDomain] = useState('');
-  const [notes, setNotes] = useState('');
   const [file, setFile] = useState(null);
   const [filePreview, setFilePreview] = useState(null);
+  const [domain, setDomain] = useState('');
+  const [notes, setNotes] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
   const [showScreenshotTool, setShowScreenshotTool] = useState(false);
+  const [useMockMode, setUseMockMode] = useState(localStorage.getItem('useMockMode') === 'true');
   const formRef = useRef(null);
 
   // Handle file drop
-  const onDrop = useCallback((acceptedFiles) => {
+  const onDrop = (acceptedFiles) => {
     if (acceptedFiles.length > 0) {
       const selectedFile = acceptedFiles[0];
+      const fileName = selectedFile.name.toLowerCase();
+      const fileType = selectedFile.type.toLowerCase();
+
+      // Check for JPG/JPEG and PNG files by extension or MIME type
+      if (!(fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || fileName.endsWith('.png') || 
+            fileType === 'image/jpeg' || fileType === 'image/png')) {
+        setUploadError('Only JPG and PNG files are allowed.'); 
+        setFile(null); 
+        setFilePreview(null);
+        return; 
+      }
+      setUploadError(null); // Clear any previous error if the file is valid
+
       setFile(selectedFile);
       
       // Create preview for image files
-      if (selectedFile.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          setFilePreview(reader.result);
-        };
-        reader.readAsDataURL(selectedFile);
-      } else {
-        setFilePreview(null);
-      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        setFilePreview(reader.result);
+      };
+      reader.readAsDataURL(selectedFile);
     }
-  }, []);
+  };
 
-  // Configure dropzone
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif'],
-      'application/pdf': ['.pdf'],
-      'text/plain': ['.txt', '.log'],
-      'text/html': ['.html', '.htm'],
+      'image/jpeg': ['.jpg', '.jpeg'],
+      'image/png': ['.png']
     },
-    maxFiles: 1,
-    maxSize: 10485760, // 10MB
+    maxSize: 10 * 1024 * 1024, // 10MB
+    maxFiles: 1
   });
 
   // Handle screenshot capture
-  const handleScreenshotCaptured = (screenshotDataUrl) => {
+  const handleScreenshotCaptured = (screenshotBlob) => {
     setShowScreenshotTool(false);
     
-    // Convert data URL to File object
-    fetch(screenshotDataUrl)
-      .then(res => res.blob())
-      .then(blob => {
-        const screenshotFile = new File([blob], 'screenshot.png', { type: 'image/png' });
-        setFile(screenshotFile);
-        setFilePreview(screenshotDataUrl);
-      });
+    // Create a File object from the Blob
+    const screenshotFile = new File([screenshotBlob], 'screenshot.png', { type: 'image/png' });
+    setFile(screenshotFile);
+    
+    // Create preview
+    const reader = new FileReader();
+    reader.onload = () => {
+      setFilePreview(reader.result);
+    };
+    reader.readAsDataURL(screenshotBlob);
   };
 
-  // Remove the current file
+  // Handle removing the file
   const handleRemoveFile = () => {
     setFile(null);
     setFilePreview(null);
+  };
+
+  // Handle mock mode toggle
+  const handleToggleMockMode = () => {
+    const newMode = !useMockMode;
+    setUseMockMode(newMode);
+    localStorage.setItem('useMockMode', newMode.toString());
+    console.log('Mock mode set to:', newMode);
   };
 
   // Handle form submission
@@ -87,49 +105,159 @@ export default function UploadPage() {
     setIsUploading(true);
     setUploadError(null);
     
+    // Use the state value for mock mode
+    console.log('Using mock mode:', useMockMode);
+    
     try {
-      // Create form data
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('domain', domain);
-      if (notes) {
-        formData.append('notes', notes);
+      if (useMockMode) {
+        // MOCK IMPLEMENTATION FOR TESTING
+        console.log('Mock upload for domain:', domain);
+        console.log('File:', file.name, file.size, file.type);
+        
+        // Simulate API processing time
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        // Generate a mock upload ID
+        const mockUploadId = 'mock-' + Math.random().toString(36).substring(2, 15);
+        
+        // Store mock data in localStorage for the analysis page to use
+        const mockAnalysisData = {
+          upload_id: mockUploadId,
+          domain: domain,
+          timestamp: new Date().toISOString(),
+          whois_data: {
+            registrar: 'Mock Registrar Inc.',
+            creation_date: '2020-01-01',
+            expiration_date: '2025-01-01',
+            status: ['clientTransferProhibited'],
+            domain_age: '3 years, 4 months'
+          },
+          virustotal_data: {
+            malicious_count: 2,
+            suspicious_count: 1,
+            harmless_count: 75,
+            undetected_count: 12,
+            total_engines: 90,
+            detections: [
+              { engine: 'MockAV-1', category: 'malicious', result: 'phishing' },
+              { engine: 'MockAV-2', category: 'malicious', result: 'malware' },
+              { engine: 'MockAV-3', category: 'suspicious', result: 'suspicious' }
+            ],
+            categories: {
+              'MockCat': 'phishing',
+              'MockDB': 'suspicious'
+            },
+            last_analysis_date: Math.floor(Date.now() / 1000) - 86400 // yesterday
+          },
+          risk_score: 65,
+          risk_factors: [
+            'Domain is less than 1 year old',
+            'Domain has been flagged by 2 security vendors'
+          ],
+          notes: notes || ''
+        };
+        
+        // Store in localStorage
+        localStorage.setItem(`analysis_${mockUploadId}`, JSON.stringify(mockAnalysisData));
+        
+        // Navigate to analysis page with the mock upload ID
+        navigate(`/analysis/${mockUploadId}`);
+      } else {
+        // REAL API IMPLEMENTATION
+        // Create form data
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('domain', domain);
+        if (notes) {
+          formData.append('notes', notes);
+        }
+        
+        // Use a longer timeout for large files
+        const timeout = 60000; // 60 seconds
+        
+        // Try different API endpoints
+        let response;
+        let error;
+        
+        // First try the proxy endpoint
+        try {
+          console.log('Trying proxy endpoint: /tools/takedowniq/api/upload');
+          response = await axios.post('/tools/takedowniq/api/upload', formData, {
+            headers: {
+              'Content-Type': 'multipart/form-data',
+            },
+            timeout: timeout,
+            maxContentLength: 10 * 1024 * 1024, // 10MB
+            maxBodyLength: 10 * 1024 * 1024, // 10MB
+          });
+        } catch (err) {
+          console.error('Proxy endpoint failed:', err);
+          error = err;
+          
+          // If proxy fails, try direct endpoint
+          try {
+            console.log('Trying direct endpoint: http://69.62.66.176:12345/upload');
+            response = await axios.post('http://69.62.66.176:12345/upload', formData, {
+              headers: {
+                'Content-Type': 'multipart/form-data',
+              },
+              timeout: timeout,
+              maxContentLength: 10 * 1024 * 1024, // 10MB
+              maxBodyLength: 10 * 1024 * 1024, // 10MB
+            });
+          } catch (directErr) {
+            console.error('Direct endpoint failed:', directErr);
+            // If both fail, throw the original error
+            throw error;
+          }
+        }
+        
+        console.log('Upload successful:', response.data);
+        
+        // Navigate to analysis page with the upload ID
+        if (response.data && response.data.upload_id) {
+          navigate(`/analysis/${response.data.upload_id}`);
+        } else {
+          throw new Error('Invalid response from server: missing upload_id');
+        }
       }
-      
-      // Upload to the API
-      const response = await axios.post('/tools/takedowniq/api/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      });
-      
-      // Navigate to analysis page with the upload ID
-      navigate(`/analysis/${response.data.upload_id}`);
     } catch (error) {
       console.error('Upload error:', error);
-      setUploadError(
-        error.response?.data?.detail || 
-        'An error occurred during upload. Please try again.'
-      );
+      
+      // Handle different error types
+      if (error.message === 'Network Error') {
+        setUploadError('Network error. Please check your connection and try again. Make sure the backend server is running.');
+      } else if (error.response) {
+        // Server responded with an error status code
+        const errorMessage = error.response.data?.detail || `Server error: ${error.response.status}`;
+        setUploadError(errorMessage);
+      } else if (error.request) {
+        // Request was made but no response received
+        setUploadError('No response from server. The server might be down or unreachable.');
+      } else {
+        // Something else went wrong
+        setUploadError(`Error: ${error.message}`);
+      }
+    } finally {
       setIsUploading(false);
     }
   };
 
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
       >
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold tracking-tight text-gray-900">Upload Evidence</h1>
-          <p className="mt-2 text-lg text-gray-600">
-            Upload a screenshot or other evidence to analyze a suspicious domain
-          </p>
-        </div>
+        <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-900">Domain Analysis</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Enter a domain name and upload evidence to analyze potential security threats.
+            </p>
+          </div>
 
-        <form ref={formRef} onSubmit={handleSubmit} className="space-y-8">
           {/* Domain input */}
           <div>
             <label htmlFor="domain" className="block text-sm font-medium leading-6 text-gray-900">
@@ -138,8 +266,8 @@ export default function UploadPage() {
             <div className="mt-2">
               <input
                 type="text"
-                name="domain"
                 id="domain"
+                name="domain"
                 className="input-field"
                 placeholder="example.com"
                 value={domain}
@@ -147,9 +275,6 @@ export default function UploadPage() {
                 required
               />
             </div>
-            <p className="mt-1 text-sm text-gray-500">
-              Enter the suspicious domain you want to analyze
-            </p>
           </div>
 
           {/* File upload area */}
@@ -175,13 +300,13 @@ export default function UploadPage() {
                         htmlFor="file-upload"
                         className="relative cursor-pointer rounded-md bg-white font-semibold text-primary-600 focus-within:outline-none focus-within:ring-2 focus-within:ring-primary-600 focus-within:ring-offset-2 hover:text-primary-500"
                       >
-                        <span>Upload a file</span>
+                        <span onClick={(e) => e.stopPropagation()}>Upload a file</span>
                         <input {...getInputProps()} id="file-upload" className="sr-only" />
                       </label>
                       <p className="pl-1">or drag and drop</p>
                     </div>
                     <p className="text-xs leading-5 text-gray-600">
-                      PNG, JPG, GIF, PDF, TXT or HTML up to 10MB
+                      Only JPG and PNG files, up to 10MB
                     </p>
                   </div>
                 </div>
@@ -254,24 +379,50 @@ export default function UploadPage() {
 
           {/* Error message */}
           {uploadError && (
-            <div className="rounded-md bg-red-50 p-4">
-              <div className="flex">
+            <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-md text-red-700">
+              <div className="flex items-start">
+                <div className="flex-shrink-0">
+                  <ExclamationTriangleIcon className="h-5 w-5 text-red-400" aria-hidden="true" />
+                </div>
                 <div className="ml-3">
-                  <h3 className="text-sm font-medium text-red-800">Error</h3>
+                  <h3 className="text-sm font-medium text-red-800">Upload Error</h3>
                   <div className="mt-2 text-sm text-red-700">
                     <p>{uploadError}</p>
+                    {uploadError.includes('Network error') && (
+                      <ul className="list-disc pl-5 mt-2 space-y-1 text-xs">
+                        <li>Check your internet connection</li>
+                        <li>The server might be temporarily unavailable</li>
+                        <li>Try refreshing the page and uploading again</li>
+                      </ul>
+                    )}
                   </div>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Submit button */}
-          <div className="flex justify-end">
+          {/* Mock Mode Toggle */}
+          <div className="mt-4 flex items-center justify-between">
+            <span className="text-sm font-medium text-gray-700">
+              {useMockMode ? 'Using Mock Mode (No Backend)' : 'Using Real API'}
+            </span>
+            <button
+              type="button"
+              className={`relative inline-flex h-6 w-11 items-center rounded-full ${useMockMode ? 'bg-blue-600' : 'bg-gray-200'}`}
+              onClick={handleToggleMockMode}
+            >
+              <span className="sr-only">Toggle Mock Mode</span>
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${useMockMode ? 'translate-x-6' : 'translate-x-1'}`}
+              />
+            </button>
+          </div>
+
+          <div className="mt-6">
             <button
               type="submit"
-              className="btn-primary"
-              disabled={isUploading || !domain || !file}
+              className="w-full btn-primary"
+              disabled={isUploading}
             >
               {isUploading ? (
                 <>
@@ -279,7 +430,10 @@ export default function UploadPage() {
                   Uploading...
                 </>
               ) : (
-                'Analyze Domain'
+                <>
+                  <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+                  Upload and Analyze
+                </>
               )}
             </button>
           </div>

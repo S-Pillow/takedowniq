@@ -196,6 +196,7 @@ export default function AnalysisPage() {
   // Generate PDF report
   const handleGenerateReport = async () => {
     setGeneratingReport(true);
+    setError(null); // Clear any previous errors
     
     try {
       // For mock data, simulate report generation
@@ -221,13 +222,63 @@ export default function AnalysisPage() {
         // Navigate to the report page
         navigate(`/report/${mockReportId}`);
       } else {
-        // For real data, make the actual API call
-        const response = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/api/report/${uploadId}`);
-        navigate(`/report/${response.data.report_id}`);
+        // For real data, try multiple API endpoints
+        let response;
+        let error;
+        
+        // First try the proxy endpoint
+        try {
+          console.log('Trying proxy endpoint: /tools/takedowniq/api/report/' + uploadId);
+          response = await axios.post(`/tools/takedowniq/api/report/${uploadId}`);
+        } catch (proxyErr) {
+          console.error('Proxy endpoint failed:', proxyErr);
+          error = proxyErr;
+          
+          // If proxy fails, try direct endpoint
+          try {
+            console.log('Trying direct endpoint with VITE_API_BASE_URL:', import.meta.env.VITE_API_BASE_URL);
+            response = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/api/report/${uploadId}`);
+          } catch (directErr) {
+            console.error('Direct endpoint failed:', directErr);
+            
+            // If both fail, try the hardcoded IP
+            try {
+              console.log('Trying hardcoded endpoint: http://69.62.66.176:12345/api/report/' + uploadId);
+              response = await axios.post(`http://69.62.66.176:12345/api/report/${uploadId}`);
+            } catch (hardcodedErr) {
+              console.error('Hardcoded endpoint failed:', hardcodedErr);
+              // If all attempts fail, throw the original error
+              throw error;
+            }
+          }
+        }
+        
+        console.log('Report generation successful:', response.data);
+        
+        if (response.data && response.data.report_id) {
+          navigate(`/report/${response.data.report_id}`);
+        } else {
+          throw new Error('Invalid response from server: missing report_id');
+        }
       }
     } catch (err) {
       console.error('Error generating report:', err);
-      setError('Failed to generate report. Please try again.');
+      
+      // Handle different error types
+      if (err.message === 'Network Error') {
+        setError('Network error. Please check your connection and try again. Make sure the backend server is running.');
+      } else if (err.response) {
+        // Server responded with an error status code
+        const errorMessage = err.response.data?.detail || `Server error: ${err.response.status}`;
+        setError(errorMessage);
+      } else if (err.request) {
+        // Request was made but no response received
+        setError('No response from server. The server might be down or unreachable.');
+      } else {
+        // Something else went wrong
+        setError(`Error: ${err.message}`);
+      }
+      
       setGeneratingReport(false);
     }
   };

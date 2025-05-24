@@ -916,6 +916,18 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
         fontSize=12,
         fontName="Helvetica-Bold"
     )
+    section_heading_style = ParagraphStyle(
+        "SectionHeading",
+        parent=heading_style,
+        fontSize=16,
+        spaceAfter=6,
+        spaceBefore=12,
+        backColor=colors.lightgrey,
+        borderWidth=1,
+        borderColor=colors.black,
+        borderPadding=5,
+        borderRadius=2
+    )
     
     # Content elements
     elements = []
@@ -924,10 +936,81 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
     elements.append(Paragraph(f"TakedownIQ Domain Analysis Report", title_style))
     elements.append(Spacer(1, 0.25*inch))
     
+    # SECTION 1: Domain Information
+    elements.append(Paragraph("DOMAIN INFORMATION", section_heading_style))
+    elements.append(Spacer(1, 0.1*inch))
+    
     # Domain and timestamp
     elements.append(Paragraph(f"Domain: {domain}", heading_style))
     elements.append(Paragraph(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
+    elements.append(Spacer(1, 0.15*inch))
+    
+    # WHOIS data
+    elements.append(Paragraph("WHOIS Information", heading_style))
+    whois_data = analysis_data.get("whois_data", {})
+    if whois_data and not whois_data.get("error"):
+        # Create a better formatted WHOIS table
+        whois_table_data = []
+        registrar = whois_data.get("registrar")
+        creation_date = whois_data.get("creation_date")
+        expiration_date = whois_data.get("expiration_date")
+        domain_age = whois_data.get("domain_age")
+        status = whois_data.get("status")
+        name_servers = whois_data.get("name_servers")
+        
+        if registrar:
+            whois_table_data.append(["Registrar", str(registrar)])
+        if creation_date:
+            whois_table_data.append(["Registration Date", str(creation_date)])
+        if expiration_date:
+            whois_table_data.append(["Expiration Date", str(expiration_date)])
+        if domain_age:
+            whois_table_data.append(["Domain Age", str(domain_age)])
+        
+        # Add the table if we have data
+        if whois_table_data:
+            table = Table(whois_table_data, colWidths=[2*inch, 3.5*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
+                ('TEXTCOLOR', (0, 0), (0, -1), colors.black),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 0.1*inch))
+        
+        # Domain Status as a list
+        if status:
+            elements.append(Paragraph("Domain Status:", subheading_style))
+            if isinstance(status, (list, tuple)):
+                for s in status:
+                    elements.append(Paragraph(f"• {s}", normal_style))
+            else:
+                elements.append(Paragraph(f"• {status}", normal_style))
+            elements.append(Spacer(1, 0.1*inch))
+        
+        # Name Servers as a list
+        if name_servers:
+            elements.append(Paragraph("Name Servers:", subheading_style))
+            if isinstance(name_servers, (list, tuple)):
+                for ns in name_servers:
+                    elements.append(Paragraph(f"• {ns}", normal_style))
+            else:
+                elements.append(Paragraph(f"• {name_servers}", normal_style))
+        
+        if not (whois_table_data or status or name_servers):
+            elements.append(Paragraph("No WHOIS data available.", normal_style))
+    else:
+        elements.append(Paragraph("No WHOIS data available.", normal_style))
+    
     elements.append(Spacer(1, 0.25*inch))
+    
+    # SECTION 2: Risk Assessment and Impact Analysis
+    elements.append(Paragraph("RISK ASSESSMENT & IMPACT ANALYSIS", section_heading_style))
+    elements.append(Spacer(1, 0.1*inch))
     
     # Risk assessment
     risk_score = analysis_data.get("risk_score", 0)
@@ -946,7 +1029,46 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
     elements.append(Paragraph("Risk Assessment", heading_style))
     elements.append(Paragraph(f"Risk Level: {risk_level} ({risk_score}/100)", risk_style))
     elements.append(Paragraph(f"Summary: {risk_summary}", normal_style))
+    elements.append(Spacer(1, 0.15*inch))
+    
+    # ChatGPT Impact Analysis
+    elements.append(Paragraph("ChatGPT Impact Analysis", heading_style))
+    chatgpt_data = analysis_data.get("chatgpt_impact", {})
+    if chatgpt_data and not chatgpt_data.get("error"):
+        # Add disruption impact score
+        disruption_score = chatgpt_data.get("disruption_impact_score", 0)
+        disruption_style = risk_high_style if disruption_score >= 7 else \
+                          risk_medium_style if disruption_score >= 4 else \
+                          normal_style
+        elements.append(Paragraph(f"Disruption Impact Score: {disruption_score}/10", disruption_style))
+        
+        # Add news impact score if available
+        news_score = chatgpt_data.get("news_impact_score")
+        if news_score is not None:
+            news_style = risk_high_style if news_score >= 7 else \
+                        risk_medium_style if news_score >= 4 else \
+                        normal_style
+            elements.append(Paragraph(f"News Impact Score: {news_score}/10", news_style))
+        
+        # Add impact analysis
+        impact_analysis = chatgpt_data.get("impact_analysis")
+        if impact_analysis:
+            elements.append(Paragraph("Impact Analysis:", subheading_style))
+            elements.append(Paragraph(impact_analysis, normal_style))
+        
+        # Add justification
+        justification = chatgpt_data.get("justification")
+        if justification:
+            elements.append(Paragraph("Justification:", subheading_style))
+            elements.append(Paragraph(justification, normal_style))
+    else:
+        elements.append(Paragraph("No ChatGPT impact analysis available.", normal_style))
+    
     elements.append(Spacer(1, 0.25*inch))
+    
+    # SECTION 3: Evidence and Analysis
+    elements.append(Paragraph("EVIDENCE & ANALYSIS", section_heading_style))
+    elements.append(Spacer(1, 0.1*inch))
     
     # Screenshot if available
     if image_path and os.path.exists(image_path):
@@ -955,7 +1077,7 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
             elements.append(Paragraph("Evidence Screenshot", heading_style))
             img = Image(image_path, width=6*inch, height=4*inch)
             elements.append(img)
-            elements.append(Spacer(1, 0.25*inch))
+            elements.append(Spacer(1, 0.15*inch))
         except Exception as e:
             logger.error(f"Error adding image to PDF: {e}")
     
@@ -976,95 +1098,45 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
     else:
         elements.append(Paragraph("No specific risk factors identified.", normal_style))
     
-    elements.append(Spacer(1, 0.25*inch))
+    elements.append(Spacer(1, 0.15*inch))
     
-    # WHOIS data
-    elements.append(Paragraph("WHOIS Information", heading_style))
-    whois_data = analysis_data.get("whois_data", {})
-    if whois_data and not whois_data.get("error"):
-        # Only include registrar name, domain status, and name servers
-        whois_table_data = []
-        registrar = whois_data.get("registrar")
-        status = whois_data.get("status")
-        name_servers = whois_data.get("name_servers")
-        if registrar:
-            whois_table_data.append(["Registrar", str(registrar)])
-        if status:
-            if isinstance(status, (list, tuple)):
-                status_str = ", ".join(str(s) for s in status)
-            else:
-                status_str = str(status)
-            whois_table_data.append(["Domain Status", status_str])
-        if name_servers:
-            if isinstance(name_servers, (list, tuple)):
-                ns_str = ", ".join(str(ns) for ns in name_servers)
-            else:
-                ns_str = str(name_servers)
-            whois_table_data.append(["Name Servers", ns_str])
-        if whois_table_data:
-            table = Table(whois_table_data, colWidths=[2*inch, 3.5*inch])
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (0, -1), colors.black),
-                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ]))
-            elements.append(table)
-        else:
-            elements.append(Paragraph("No WHOIS data available.", normal_style))
-    else:
-        elements.append(Paragraph("No WHOIS data available.", normal_style))
-
-    
-    elements.append(Spacer(1, 0.25*inch))
-    
-    # DNS records
-    elements.append(Paragraph("DNS Records", heading_style))
-    dns_data = analysis_data.get("dns_data", {})
-    if dns_data and not dns_data.get("error"):
-        # A Records
-        if dns_data.get("a_records"):
-            elements.append(Paragraph("A Records:", subheading_style))
-            for record in dns_data["a_records"]:
-                elements.append(Paragraph(f"• {record}", normal_style))
-            elements.append(Spacer(1, 0.1*inch))
-        
-        # MX Records
-        if dns_data.get("mx_records"):
-            elements.append(Paragraph("MX Records:", subheading_style))
-            for record in dns_data["mx_records"]:
-                elements.append(Paragraph(f"• {record}", normal_style))
-            elements.append(Spacer(1, 0.1*inch))
-        
-        # NS Records
-        if dns_data.get("ns_records"):
-            elements.append(Paragraph("NS Records:", subheading_style))
-            for record in dns_data["ns_records"]:
-                elements.append(Paragraph(f"• {record}", normal_style))
-            elements.append(Spacer(1, 0.1*inch))
-        
-        # TXT Records
-        if dns_data.get("txt_records"):
-            elements.append(Paragraph("TXT Records:", subheading_style))
-            for record in dns_data["txt_records"]:
-                elements.append(Paragraph(f"• {record}", normal_style))
-    else:
-        elements.append(Paragraph("No DNS data available.", normal_style))
-    
-    elements.append(Spacer(1, 0.25*inch))
-    
-    # VirusTotal data
+    # VirusTotal data with improved formatting
     elements.append(Paragraph("VirusTotal Analysis", heading_style))
     vt_data = analysis_data.get("virustotal_data", {})
     if vt_data and not vt_data.get("error"):
         malicious_count = vt_data.get("malicious_count", 0)
+        suspicious_count = vt_data.get("suspicious_count", 0)
+        harmless_count = vt_data.get("harmless_count", 0)
+        undetected_count = vt_data.get("undetected_count", 0)
         total_engines = vt_data.get("total_engines", 0)
         
-        elements.append(Paragraph(f"Detection Rate: {malicious_count}/{total_engines} engines", 
-                                 risk_high_style if malicious_count > 0 else normal_style))
+        # Create a summary table for VirusTotal results
+        vt_summary_data = [
+            ["Status", "Count", "Percentage"],
+            ["Malicious", str(malicious_count), f"{(malicious_count/total_engines*100) if total_engines else 0:.1f}%"],
+            ["Suspicious", str(suspicious_count), f"{(suspicious_count/total_engines*100) if total_engines else 0:.1f}%"],
+            ["Harmless", str(harmless_count), f"{(harmless_count/total_engines*100) if total_engines else 0:.1f}%"],
+            ["Undetected", str(undetected_count), f"{(undetected_count/total_engines*100) if total_engines else 0:.1f}%"],
+            ["Total", str(total_engines), "100%"]
+        ]
+        
+        vt_table = Table(vt_summary_data, colWidths=[1.5*inch, 1*inch, 1*inch])
+        vt_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            # Highlight malicious row if there are detections
+            ('BACKGROUND', (0, 1), (-1, 1), colors.pink if malicious_count > 0 else colors.white),
+            ('FONTNAME', (0, 1), (-1, 1), 'Helvetica-Bold' if malicious_count > 0 else 'Helvetica'),
+            # Highlight suspicious row if there are suspicious results
+            ('BACKGROUND', (0, 2), (-1, 2), colors.lightgrey if suspicious_count > 0 else colors.white),
+        ]))
+        elements.append(vt_table)
+        elements.append(Spacer(1, 0.1*inch))
         
         # Categories
         if vt_data.get("categories"):
@@ -1076,13 +1148,49 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
         # Detections
         if vt_data.get("detections"):
             elements.append(Paragraph("Detection Details:", subheading_style))
+            # Create a table for detections
+            detection_data = [["Engine", "Category", "Result"]]
             for detection in vt_data["detections"]:
-                elements.append(Paragraph(
-                    f"• {detection.get('engine')}: {detection.get('result')} ({detection.get('category')})", 
-                    risk_high_style
-                ))
+                detection_data.append([
+                    detection.get('engine', 'Unknown'),
+                    detection.get('category', 'Unknown'),
+                    detection.get('result', 'Unknown')
+                ])
+            
+            if len(detection_data) > 1:  # Only create table if we have detections
+                detection_table = Table(detection_data, colWidths=[1.5*inch, 1*inch, 2*inch])
+                detection_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    # Highlight malicious rows
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.lightpink),
+                ]))
+                elements.append(detection_table)
     else:
         elements.append(Paragraph("No VirusTotal data available.", normal_style))
+    
+    # SECTION 4: Additional Notes
+    elements.append(Spacer(1, 0.25*inch))
+    elements.append(Paragraph("ADDITIONAL NOTES", section_heading_style))
+    elements.append(Spacer(1, 0.1*inch))
+    elements.append(Paragraph("Additional Notes", heading_style))
+    notes = analysis_data.get("notes")
+    if notes and notes.strip():
+        elements.append(Paragraph(notes, normal_style))
+    else:
+        elements.append(Paragraph("No additional notes provided.", normal_style))
+    
+    # Footer
+    elements.append(Spacer(1, 0.5*inch))
+    elements.append(Paragraph("This report was generated by TakedownIQ for investigation purposes.", 
+                             ParagraphStyle("Footer", parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
+    elements.append(Paragraph("All data is processed in-memory and not stored after the session ends.", 
+                             ParagraphStyle("Footer", parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
     
     # Build the PDF
     doc.build(elements)
@@ -1199,6 +1307,23 @@ async def chatgpt_impact(request: Request):
         if isinstance(result, dict) and 'error' in result:
             logger.error(f"Error in analyze_domain_impact: {result['error']}")
             return JSONResponse(status_code=500, content=result)
+        
+        # Store the ChatGPT impact analysis in the active_sessions
+        # First, check if we can identify the session from the domain
+        domain = data.get('domain')
+        upload_id = None
+        
+        for session_id, session_data in active_sessions.items():
+            if session_data.get('domain') == domain:
+                upload_id = session_id
+                break
+        
+        if upload_id:
+            logger.info(f"Found matching session for domain {domain}, storing ChatGPT impact analysis")
+            # Store the ChatGPT impact analysis in the session data
+            active_sessions[upload_id]['chatgpt_impact'] = result
+        else:
+            logger.warning(f"Could not find matching session for domain {domain}, ChatGPT impact analysis won't be included in PDF report")
         
         logger.info("Successfully completed ChatGPT impact analysis")
         return JSONResponse(content=result)
