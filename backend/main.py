@@ -22,7 +22,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 
 # Import the ChatGPT impact analysis helper
-from chatgpt_impact import analyze_domain_impact, test_openai_connection
+from chatgpt_impact import analyze_domain_impact
 
 # --- Logging for OpenAI and VirusTotal API requests and responses ---
 import logging
@@ -1042,11 +1042,33 @@ async def test_openai():
     Test endpoint to verify the OpenAI API connection is working correctly.
     """
     logger.info("Test OpenAI endpoint called")
-    result = test_openai_connection()
-    if "error" in result:
-        logger.error(f"OpenAI test failed: {result['error']}")
-        return JSONResponse(status_code=500, content=result)
-    return JSONResponse(content=result)
+    try:
+        # Import OpenAI client from chatgpt_impact module
+        from chatgpt_impact import client
+        
+        if not client:
+            error_msg = "OpenAI client not initialized. API key may be missing or invalid."
+            logger.error(error_msg)
+            return JSONResponse(status_code=500, content={"error": error_msg})
+        
+        # Simple test request
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "system", "content": "You are a helpful assistant."},
+                      {"role": "user", "content": "Say hello"}],
+            temperature=0.3,
+            max_tokens=10
+        )
+        
+        result = response.choices[0].message.content
+        logger.info(f"OpenAI test successful. Response: {result}")
+        return JSONResponse(content={"success": True, "message": "OpenAI connection is working", "response": result})
+    except Exception as e:
+        import traceback
+        error_msg = f"Error testing OpenAI connection: {str(e)}"
+        logger.error(error_msg)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={"error": error_msg})
 
 @app.post("/api/chatgpt-impact")
 @app.post("/chatgpt-impact")

@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 # Get OpenAI API key from environment
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Check if API key is available
 if OPENAI_API_KEY:
     logger.info(f"OpenAI API key is set. First 4 characters: {OPENAI_API_KEY[:4] if len(OPENAI_API_KEY) > 4 else '[too short]'}")
     logger.info(f"API key length: {len(OPENAI_API_KEY)}")
@@ -30,7 +29,6 @@ client = None
 custom_httpx_client = None
 
 if OPENAI_API_KEY:
-    # Create a custom httpx client with logging
     custom_httpx_client = httpx.Client(
         transport=httpx.HTTPTransport(retries=3),
         timeout=60.0,
@@ -44,84 +42,29 @@ if OPENAI_API_KEY:
 else:
     logger.error("Failed to initialize OpenAI client due to missing API key")
 
-
-def test_openai_connection() -> Dict[str, Any]:
-    """
-    Test function to verify the OpenAI client is working correctly.
-    Returns a success message if the connection is working, or an error message if not.
-    """
-    try:
-        if not client:
-            return {"error": "OpenAI client not initialized. API key may be missing or invalid."}
-        
-        logger.info("Testing OpenAI connection with a simple request")
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a helpful assistant."},
-                      {"role": "user", "content": "Say hello"}],
-            temperature=0.3,
-            max_tokens=10
-        )
-        
-        result = response.choices[0].message.content
-        logger.info(f"OpenAI test successful. Response: {result}")
-        return {"success": True, "message": "OpenAI connection is working", "response": result}
-    except Exception as e:
-        logger.error(f"Error testing OpenAI connection: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return {"error": f"Error testing OpenAI connection: {str(e)}"}
-
-
 def analyze_domain_impact(domain_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Calls the OpenAI API (ChatGPT) to analyze and score the impact of placing a domain on registry server hold.
-    Returns a structured response with Disruption Impact Score, News Impact Score, and rationale.
-    """
-    # Validate input data
     if not domain_data:
         logger.error("Empty domain data provided to analyze_domain_impact")
         return {"error": "No domain data provided for analysis"}
-        
-    # Check for required fields
+
     required_fields = ['domain', 'whois_data', 'dns_data', 'ssl_data', 'virustotal_data']
     missing_fields = [field for field in required_fields if field not in domain_data]
     if missing_fields:
         logger.error(f"Missing required fields in domain data: {missing_fields}")
         return {"error": f"Missing required data: {', '.join(missing_fields)}"}
-    
-    # Check if OpenAI client is initialized
+
     if not client:
         logger.error("OpenAI client not initialized. API key may be missing or invalid.")
         return {"error": "OpenAI service unavailable. Please check API configuration."}
-    
-    # Log analysis start
-    logger.info(f"Starting impact analysis for domain: {domain_data.get('domain')}")
-    logger.info(f"Data provided: {list(domain_data.keys())}")
-    
-    # Extract data from the input
+
     domain = domain_data.get("domain", "[unknown]")
     whois_data = domain_data.get("whois_data", {})
     dns_data = domain_data.get("dns_data", {})
     ssl_data = domain_data.get("ssl_data", {})
     virustotal_data = domain_data.get("virustotal_data", {})
-    
-    #############################################################################
-    #                                                                           #
-    #                      !!! CRITICAL PROMPT SECTION !!!                      #
-    #                                                                           #
-    # WARNING: This prompt has been carefully crafted and calibrated.            #
-    # Modifications may significantly impact analysis quality and consistency.   #
-    # Consult with the security team before making ANY changes.                  #
-    #                                                                           #
-    #############################################################################
-    
-    # This prompt defines the entire structure and quality of the domain impact analysis.
-    # It provides the framework for evaluating domains placed on ServerHold/ClientHold.
-    # The exact wording, scoring criteria, and output format are essential for consistent
-    # and accurate domain impact assessments across the application.
-    # First part of the prompt with the input data (using f-string for variable substitution)
+
     input_data = f"""
-You are a cybersecurity and internet infrastructure analyst. Your task is to assess the **global disruption impact** and **news visibility** if the following domain were placed on **ServerHold** or **ClientHold** status. Use the data provided and apply a structured framework to generate a concise but technically-informed response.
+You are a cybersecurity and internet infrastructure analyst. Your task is to assess the global disruption impact and public news relevance if the following domain were placed on ServerHold or ClientHold status. Use the provided technical and contextual data to form a concise, structured, and professionally grounded analysis.
 
 ## INPUT DATA:
 - Domain: {domain}
@@ -131,7 +74,6 @@ You are a cybersecurity and internet infrastructure analyst. Your task is to ass
 - VirusTotal: {virustotal_data}
 """
 
-    # Second part of the prompt with the output format and scoring framework (using raw string to avoid formatting issues)
     output_format = """
 ## REQUIRED OUTPUT FORMAT:
 ```json
@@ -157,129 +99,40 @@ You are a cybersecurity and internet infrastructure analyst. Your task is to ass
 - 7-8: High - major tech press, mainstream media attention
 - 9-10: Global - widespread news, government statements, global trends
 
+## IMPORTANT CLARIFICATION FOR EVALUATION LOGIC:
+
+- Do not inflate the Disruption Impact Score due to the presence of SPF records, SSL certificates, or MX entries alone — these are common on many domains (legit or malicious) and do not imply widespread infrastructure usage.
+- Assign higher disruption scores only if the domain is shown to support:
+  - Public service access (e.g., education, healthcare, government portals)
+  - Embedded third-party APIs or identity/authentication systems
+  - Major cloud or communication platforms with significant user dependency
+- Presence of phishing, malware, or abuse flags on VirusTotal does not equal high disruption potential unless:
+  - The domain is widely trusted or used by legitimate services
+  - It is part of a known exploit chain or has caused public damage
+- Treat malicious domains with no legitimate dependency as low disruption/high risk. Their takedown is usually beneficial and should be scored conservatively.
+- News Impact Score should be low (1-3) unless the domain is involved in a breach, incident, or campaign covered by mainstream media or trending online.
+
 Base your evaluation on observable data and reasoned inference. Be conservative if data is unclear or incomplete. Return your analysis in a structured, professional tone suitable for automated tools and dashboards.
 """
 
-    # Combine the parts to create the full prompt
     prompt = input_data + output_format
 
-    #############################################################################
-    #                                                                         #
-    #                     END OF CRITICAL PROMPT SECTION                     #
-    #                                                                         #
-    #############################################################################
-
-    # Log the request payload and prompt
     logger.info("[OpenAI] Sending domain impact analysis request for domain: %s", domain)
-    
-    # Create a detailed log file for audit and debugging purposes
-    import json
-    import datetime
-    import os
-    
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chatgpt_logs")
-    os.makedirs(log_dir, exist_ok=True)
-    
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = os.path.join(log_dir, f"chatgpt_request_{domain.replace('.', '_')}_{timestamp}.json")
-    
-    with open(log_filename, "w") as f:
-        json.dump({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "domain": domain,
-            "request_data": {
-                "domain": domain,
-                "whois_data": whois_data,
-                "dns_data": dns_data,
-                "ssl_data": ssl_data,
-                "virustotal_data": virustotal_data,
-            },
-            "prompt": prompt
-        }, f, indent=2)
-    
-    logger.info("[OpenAI] Full request logged to: %s", log_filename)
-
-    if not client:
-        # This check is redundant if the one at the start of the function is present
-        # but kept for safety in case of future refactoring.
-        return {"error": "OpenAI client not initialized."}
 
     try:
-        logger.info("[DEBUG] About to call OpenAI API")
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a cybersecurity domain analyst."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a cybersecurity domain analyst."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.3,
             max_tokens=400,
             response_format={"type": "json_object"}
         )
-        logger.info("[DEBUG] OpenAI API call successful")
-    except Exception as e:
-        logger.error(f"[DEBUG] Error calling OpenAI API: {str(e)}")
-        logger.error(f"[DEBUG] Exception type: {type(e).__name__}")
-        import traceback
-        logger.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
-        return {"error": f"Error calling OpenAI API: {str(e)}"}
-    # Parse and return the JSON result
-    try:
         result = response.choices[0].message.content
-        logger.info("[OpenAI] Received response for domain: %s", domain)
-        
-        # Log the response to a file
-        import json
-        import datetime
-        import os
-        
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chatgpt_logs")
-        os.makedirs(log_dir, exist_ok=True)
-        
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = os.path.join(log_dir, f"chatgpt_response_{domain.replace('.', '_')}_{timestamp}.json")
-        
-        try:
-            parsed_result = json.loads(result)
-            
-            with open(log_filename, "w") as f:
-                json.dump({
-                    "timestamp": datetime.datetime.now().isoformat(),
-                    "domain": domain,
-                    "raw_response": result,
-                    "parsed_response": parsed_result,
-                    "model": "gpt-3.5-turbo",
-                    "usage": {
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens
-                    }
-                }, f, indent=2)
-            
-            logger.info("[OpenAI] Full response logged to: %s", log_filename)
-            return parsed_result
-        except json.JSONDecodeError as e:
-            logger.error(f"[DEBUG] Error parsing JSON result: {str(e)}")
-            logger.error(f"[DEBUG] Result content: {result}")
-            return {"error": f"Error parsing ChatGPT response: {str(e)}"}
-        except Exception as e:
-            logger.error(f"[DEBUG] Unexpected error in analyze_domain_impact: {str(e)}")
-            import traceback
-            logger.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
-            return {"error": f"Unexpected error in ChatGPT analysis: {str(e)}"}
+        parsed_result = json.loads(result)
+        return parsed_result
     except Exception as e:
-        logger.error("[OpenAI] Error parsing response: %s", str(e))
-        
-        # Log the error
-        import datetime
-        import os
-        
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chatgpt_logs")
-        os.makedirs(log_dir, exist_ok=True)
-        
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = os.path.join(log_dir, f"chatgpt_error_{domain.replace('.', '_')}_{timestamp}.txt")
-        
-        with open(log_filename, "w") as f:
-            f.write(f"Error: {str(e)}\n\nRaw response:\n{str(response)}")
-        
-        logger.error("[OpenAI] Error details logged to: %s", log_filename)
-        return {"error": str(e), "raw_response": str(response)}
+        logger.error("OpenAI error: %s", str(e))
+        return {"error": str(e)}
