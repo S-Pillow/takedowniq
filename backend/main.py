@@ -2,6 +2,7 @@ import os
 import uuid
 import tempfile
 import shutil
+import re
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -21,7 +22,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 
 # Import the ChatGPT impact analysis helper
-from chatgpt_impact import analyze_domain_impact
+from chatgpt_impact import analyze_domain_impact, test_openai_connection
 
 # --- Logging for OpenAI and VirusTotal API requests and responses ---
 import logging
@@ -43,7 +44,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Log to console
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -51,31 +58,45 @@ app = FastAPI(title="TakedownIQ API",
               description="API for analyzing suspicious domains",
               version="1.0.0")
 
-# Configure CORS
+# Configure CORS - allow all origins for troubleshooting
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://69.62.66.176:3000",  # Frontend dev server on IP
-        "http://localhost:3000",     # Frontend dev server on localhost
-        "http://69.62.66.176",       # Production on IP
-        "http://localhost",          # Production on localhost
-        "*"                          # For development - remove in production
-    ],
+    allow_origins=["*"],  # Allow all origins for troubleshooting
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Create temp directory for file storage during processing
-TEMP_DIR = Path(tempfile.gettempdir()) / "takedowniq"
-TEMP_DIR.mkdir(exist_ok=True)
+# Always use a directory in the current working directory for reliability
+TEMP_DIR = Path(os.getcwd()) / "temp"
+os.makedirs(TEMP_DIR, mode=0o755, exist_ok=True)
+logger.info(f"Created temporary directory at: {TEMP_DIR}")
+
+# Ensure the directory is writable
+if not os.access(TEMP_DIR, os.W_OK):
+    logger.warning(f"Temporary directory {TEMP_DIR} is not writable, attempting to fix permissions")
+    try:
+        os.chmod(TEMP_DIR, 0o755)
+    except Exception as perm_error:
+        logger.error(f"Could not fix permissions on {TEMP_DIR}: {perm_error}")
 
 # In-memory storage for active analysis sessions
 # This will be lost when the server restarts
-active_sessions: Dict[str, Dict[str, Any]] = {}
+try:
+    active_sessions: Dict[str, Dict[str, Any]] = {}
+    logger.info("Initialized active sessions storage")
+except Exception as session_error:
+    logger.error(f"Error initializing active sessions: {session_error}")
+    active_sessions = {}
 
 # VirusTotal API key
 VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY")
+if VIRUSTOTAL_API_KEY:
+    logger.info(f"VirusTotal API Key loaded, starts with: {VIRUSTOTAL_API_KEY[:4]}...")
+else:
+    logger.error("VirusTotal API Key not found in environment!")
 
 # Models
 class DomainAnalysisRequest(BaseModel):
@@ -458,13 +479,27 @@ def get_ssl_info(domain: str) -> Dict[str, Any]:
 async def get_virustotal_data(domain: str) -> Dict[str, Any]:
     """Get VirusTotal information for a domain."""
     if not VIRUSTOTAL_API_KEY:
-        logger.warning("VirusTotal API key not set")
+        logger.error("VirusTotal API key is not available at get_virustotal_data call time.")
         return {"error": "VirusTotal API key not configured"}
     
+    logger.info(f"Attempting to initialize VirusTotal client with key starting: {VIRUSTOTAL_API_KEY[:4]}...")
+    client = None
     try:
+        # Initialize the VirusTotal client
         client = vt.Client(VIRUSTOTAL_API_KEY)
-        
-        # Get domain report
+        logger.info("VirusTotal client initialized successfully.")
+    except Exception as e_vt_client:
+        logger.error(f"Error initializing VirusTotal client: {e_vt_client}", exc_info=True)
+        if client: # Try to close if partially initialized
+            try:
+                await client.close()
+            except Exception as e_close:
+                logger.error(f"Error closing VT client after initialization failure: {e_close}")
+        return {"error": f"Failed to initialize VirusTotal client: {e_vt_client}"}
+
+    # If client initialization was successful, proceed to make the API call
+    try:
+        logger.info(f"Making VirusTotal API request for domain: {domain}")
         domain_obj = await client.get_object_async(f"/domains/{domain}")
         
         # Extract relevant data
@@ -474,7 +509,7 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
         # Process detection results
         detections = []
         for engine, result in last_analysis_results.items():
-            if result.get("category") == "malicious":
+            if result.get("category") == "malicious" or result.get("category") == "suspicious":
                 detections.append({
                     "engine": engine,
                     "category": result.get("category"),
@@ -484,10 +519,48 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
         # Get categories if available
         categories = domain_obj.get("categories", {})
         
-        # Close the client
-        await client.close_async()
+        # Get last analysis date and format it
+        raw_vt_date = domain_obj.get("last_analysis_date")
+        formatted_date = None
+
+        try:
+            # First, handle the case where raw_vt_date is already an integer
+            if isinstance(raw_vt_date, int) and raw_vt_date > 0:
+                formatted_date = datetime.fromtimestamp(raw_vt_date, tz=timezone.utc).isoformat()
+                logger.info(f"Successfully parsed VirusTotal date from integer timestamp: {raw_vt_date}")
+            # Next, handle the case where raw_vt_date is a string that can be converted to an integer
+            elif isinstance(raw_vt_date, str) and raw_vt_date.strip():
+                # Try to parse as ISO format string first
+                try:
+                    # If it's already in ISO format, parse it directly
+                    parsed_date = datetime.fromisoformat(raw_vt_date.replace('Z', '+00:00'))
+                    formatted_date = parsed_date.isoformat()
+                    logger.info(f"Successfully parsed VirusTotal date from ISO format string: {raw_vt_date}")
+                except ValueError:
+                    # If not ISO format, try to convert to integer timestamp
+                    try:
+                        timestamp_int = int(raw_vt_date)
+                        if timestamp_int > 0:
+                            formatted_date = datetime.fromtimestamp(timestamp_int, tz=timezone.utc).isoformat()
+                            logger.info(f"Successfully parsed VirusTotal date from string numeric timestamp: {raw_vt_date}")
+                        else:
+                            logger.info(f"VirusTotal timestamp '{raw_vt_date}' converted to non-positive integer: {timestamp_int}, using current time")
+                            formatted_date = datetime.now(tz=timezone.utc).isoformat()
+                    except ValueError:
+                        logger.info(f"VirusTotal last_analysis_date is not a valid ISO format or integer: '{raw_vt_date}', using current time")
+                        formatted_date = datetime.now(tz=timezone.utc).isoformat()
+            elif raw_vt_date is None or raw_vt_date == "":
+                logger.info("VirusTotal last_analysis_date is None or empty, using current time")
+                formatted_date = datetime.now(tz=timezone.utc).isoformat()
+            else:
+                logger.info(f"VirusTotal last_analysis_date is of unexpected type: {type(raw_vt_date).__name__}, using current time")
+                formatted_date = datetime.now(tz=timezone.utc).isoformat()
+        except Exception as e:
+            logger.info(f"Error parsing VirusTotal date: {e}, using current time")
+            formatted_date = datetime.now(tz=timezone.utc).isoformat()
         
-        return {
+        # Build the result
+        result = {
             "malicious_count": last_analysis_stats.get("malicious", 0),
             "suspicious_count": last_analysis_stats.get("suspicious", 0),
             "harmless_count": last_analysis_stats.get("harmless", 0),
@@ -495,11 +568,39 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
             "total_engines": sum(last_analysis_stats.values()),
             "detections": detections,
             "categories": categories,
-            "last_analysis_date": domain_obj.get("last_analysis_date")
+            "last_analysis_date": formatted_date # Use the parsed date (or None if parsing failed)
         }
-    except Exception as e:
-        logger.error(f"Error getting VirusTotal data: {e}")
-        return {"error": str(e)}
+        
+        logger.info(f"Successfully retrieved VirusTotal data for {domain} with {result['malicious_count']} malicious detections")
+        return result
+        
+    except vt.error.APIError as e_vt_api:
+        logger.error(f"VirusTotal API error for domain {domain}: {e_vt_api}", exc_info=True)
+        # Check for specific error codes, e.g., NotFoundError
+        if isinstance(e_vt_api, vt.error.NotFoundError):
+            return {"error": f"Domain {domain} not found in VirusTotal.", "details": str(e_vt_api)}
+        return {"error": f"VirusTotal API error: {e_vt_api}", "details": str(e_vt_api)}
+    except Exception as e_general_api:
+        logger.error(f"Unexpected error during VirusTotal API call for domain {domain}: {e_general_api}", exc_info=True)
+        return {"error": f"Unexpected error processing VirusTotal data: {e_general_api}"}
+    finally:
+        if client:
+            try:
+                await client.close_async()
+                logger.info(f"VirusTotal client closed for domain {domain}.")
+                # vt-py client typically manages its own HTTPX session, 
+                # but explicit close_async is good practice if available and needed.
+                # For vt.Client, closing is usually handled by context manager or when it goes out of scope.
+                # If using httpx directly, then async with client: ... else await client.aclose()
+                # For now, let's assume vt.Client handles this or doesn't require explicit close_async here
+                # await client.close_async() 
+                # logger.info("VirusTotal client (potentially) closed.")
+                pass # vt.Client usually handles its own session lifecycle
+            except Exception as e_close_final:
+                logger.error(f"Error attempting to close VirusTotal client in finally block: {e_close_final}")
+
+    # Fallback if something unexpected happens and no return was hit
+    return {"error": "Unknown error in get_virustotal_data after API call attempt"}
 
 def calculate_risk_score(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
     """Calculate risk score and identify risk factors based on analysis data."""
@@ -934,19 +1035,60 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
 
 # API Routes
 
+@app.get("/api/test-openai")
+@app.get("/test-openai")
+async def test_openai():
+    """
+    Test endpoint to verify the OpenAI API connection is working correctly.
+    """
+    logger.info("Test OpenAI endpoint called")
+    result = test_openai_connection()
+    if "error" in result:
+        logger.error(f"OpenAI test failed: {result['error']}")
+        return JSONResponse(status_code=500, content=result)
+    return JSONResponse(content=result)
+
 @app.post("/api/chatgpt-impact")
+@app.post("/chatgpt-impact")
 async def chatgpt_impact(request: Request):
     """
     Receives domain analysis data and returns ChatGPT-based impact analysis and scores.
     Expects JSON body with at least: domain, whois_data, dns_data, ssl_data, virustotal_data.
     """
     try:
+        logger.info("ChatGPT impact analysis endpoint called")
         data = await request.json()
+        logger.info(f"Received data for domain: {data.get('domain', 'unknown')}")
+        
+        # Check if we have the required fields
+        required_fields = ['domain', 'whois_data', 'dns_data', 'ssl_data', 'virustotal_data']
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            logger.error(f"Missing required fields in request: {missing_fields}")
+            return JSONResponse(status_code=400, content={"error": f"Missing required fields: {', '.join(missing_fields)}"})
+        
+        # Call the analyze_domain_impact function
+        logger.info("Calling analyze_domain_impact function")
         result = analyze_domain_impact(data)
+        
+        # Check if there was an error in the result
+        if isinstance(result, dict) and 'error' in result:
+            logger.error(f"Error in analyze_domain_impact: {result['error']}")
+            return JSONResponse(status_code=500, content=result)
+        
+        logger.info("Successfully completed ChatGPT impact analysis")
         return JSONResponse(content=result)
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error in request: {str(e)}")
+        return JSONResponse(status_code=400, content={"error": f"Invalid JSON in request: {str(e)}"})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        logger.error(f"Unexpected error in chatgpt_impact endpoint: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={"error": f"Server error: {str(e)}"})
 
+@app.post("/upload", response_model=AnalysisResponse)
 @app.post("/api/upload", response_model=AnalysisResponse)
 async def upload_file(
     file: UploadFile = File(...),
@@ -955,28 +1097,117 @@ async def upload_file(
     tags: Optional[str] = Form(None),
     background_tasks: BackgroundTasks = None
 ):
+    global TEMP_DIR
+    # Log the request details
+    logger.info(f"Received upload request for domain: {domain}, file: {file.filename}, content_type: {file.content_type}")
+    # Add a simple test response for debugging
+    logger.info("TEST: Upload endpoint called successfully")
     """Upload a file and start domain analysis."""
-    # Validate file type
-    allowed_types = ["image/jpeg", "image/png", "application/pdf"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="File type not allowed. Please upload a PNG, JPEG, or PDF file.")
+    # Validate file type - be more permissive with content types
+    allowed_types = ["image/jpeg", "image/png", "application/pdf", "image/gif", "text/plain", "text/html"]
+    
+    # Some browsers/clients might send slightly different content types
+    content_type_base = file.content_type.split(';')[0].strip().lower()
+    
+    if not any(allowed_type in content_type_base for allowed_type in ["image/", "application/pdf", "text/plain", "text/html"]):
+        logger.warning(f"Rejected file upload with content type: {file.content_type}")
+        raise HTTPException(status_code=400, detail="File type not allowed. Please upload an image, PDF, or text file.")
+        
+    # Log accepted file
+    logger.info(f"Accepted file upload with content type: {file.content_type}")
     
     # Generate a unique ID for this upload
     upload_id = str(uuid.uuid4())
     
     # Create a temporary directory for this analysis
-    analysis_dir = TEMP_DIR / upload_id
-    analysis_dir.mkdir(exist_ok=True)
+    # First check if TEMP_DIR exists and is writable
+    if not os.path.exists(TEMP_DIR):
+        logger.warning(f"TEMP_DIR does not exist, creating it: {TEMP_DIR}")
+        try:
+            os.makedirs(TEMP_DIR, mode=0o755, exist_ok=True)
+        except Exception as temp_dir_error:
+            logger.error(f"Failed to create TEMP_DIR: {temp_dir_error}")
+            # Use a fallback directory in the current working directory
+            TEMP_DIR = Path(os.getcwd()) / "uploads"
+            os.makedirs(TEMP_DIR, mode=0o755, exist_ok=True)
+            logger.info(f"Using fallback TEMP_DIR: {TEMP_DIR}")
     
-    # Save the uploaded file
-    file_path = analysis_dir / file.filename
+    # Create analysis directory using os.makedirs for better reliability
+    analysis_dir = TEMP_DIR / upload_id
     try:
-        async with aiofiles.open(file_path, 'wb') as out_file:
-            content = await file.read()
-            await out_file.write(content)
+        os.makedirs(analysis_dir, mode=0o755, exist_ok=True)
+        logger.info(f"Created analysis directory at: {analysis_dir}")
+    except Exception as dir_error:
+        logger.error(f"Error creating analysis directory: {dir_error}")
+        # Try a different approach if the first one fails
+        try:
+            # Use absolute path for reliability
+            alt_dir = Path(os.path.abspath(os.getcwd())) / "uploads" / upload_id
+            os.makedirs(alt_dir, mode=0o755, exist_ok=True)
+            analysis_dir = alt_dir
+            logger.info(f"Created alternative analysis directory at: {analysis_dir}")
+        except Exception as alt_dir_error:
+            logger.error(f"Error creating alternative analysis directory: {alt_dir_error}")
+            # Last resort - use /tmp directly
+            try:
+                last_resort_dir = Path("/tmp") / "takedowniq_uploads" / upload_id
+                os.makedirs(last_resort_dir, mode=0o777, exist_ok=True)
+                analysis_dir = last_resort_dir
+                logger.info(f"Created last resort directory at: {analysis_dir}")
+            except Exception as last_error:
+                logger.error(f"All directory creation attempts failed: {last_error}")
+                raise HTTPException(status_code=500, detail=f"Server storage error. Please contact support.")
+    
+    # Save the uploaded file with improved error handling
+    try:
+        # Sanitize the filename to avoid path traversal issues
+        safe_filename = os.path.basename(file.filename or "")
+        if not safe_filename:  # If filename is empty for some reason
+            safe_filename = f"upload_{upload_id}.jpg"
+        
+        # Ensure filename is safe and unique
+        safe_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', safe_filename)
+        file_path = os.path.join(str(analysis_dir), safe_filename)
+        
+        # Log the file details
+        logger.info(f"Saving uploaded file: {safe_filename} (type: {file.content_type}) to {file_path}")
+        
+        # Read the file content with a size limit
+        try:
+            # Reset file position to start
+            await file.seek(0)
+            
+            # Read with a size limit (10MB)
+            MAX_SIZE = 10 * 1024 * 1024  # 10MB
+            content = await file.read(MAX_SIZE)
+            
+            if len(content) == 0:
+                raise ValueError("Empty file uploaded")
+                
+            logger.info(f"Read {len(content)} bytes from uploaded file")
+            
+            # Save using standard file operations for reliability
+            try:
+                with open(file_path, 'wb') as out_file:
+                    out_file.write(content)
+                logger.info(f"Successfully saved file to {file_path}")
+            except IOError as io_error:
+                logger.error(f"IOError writing file: {io_error}")
+                # Try alternative approach with lower-level file operations
+                with os.fdopen(os.open(file_path, os.O_WRONLY | os.O_CREAT, 0o644), 'wb') as out_file:
+                    out_file.write(content)
+                logger.info(f"Successfully saved file using alternative method to {file_path}")
+                
+        except ValueError as val_error:
+            logger.error(f"Value error with file: {val_error}")
+            raise HTTPException(status_code=400, detail=f"Invalid file: {str(val_error)}")
+        except Exception as read_error:
+            logger.error(f"Error reading or writing file: {read_error}")
+            raise HTTPException(status_code=500, detail="Error processing uploaded file. Please try again.")
+            
     except Exception as e:
-        logger.error(f"Error saving file: {e}")
-        raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
+        logger.error(f"Error in file upload process: {e}")
+        raise HTTPException(status_code=500, detail="Error uploading file. Please try again.")
     
     # Start the analysis process
     try:
@@ -990,7 +1221,14 @@ async def upload_file(
         ssl_data = get_ssl_info(domain)
         
         # Get VirusTotal data
-        virustotal_data = await get_virustotal_data(domain)
+        try:
+            logger.info(f"Getting VirusTotal data for domain: {domain}")
+            virustotal_data = await get_virustotal_data(domain)
+            logger.info(f"Successfully retrieved VirusTotal data for domain: {domain}")
+        except Exception as vt_error:
+            logger.error(f"Error getting VirusTotal data: {vt_error}")
+            # Don't fail the entire analysis if VirusTotal fails
+            virustotal_data = {"error": f"Error retrieving VirusTotal data: {str(vt_error)}"}
         
         # Compile analysis data
         analysis_data = {
@@ -1009,28 +1247,105 @@ async def upload_file(
         # Calculate risk score and factors
         risk_data = calculate_risk_score(analysis_data)
         analysis_data.update(risk_data)
+
+        # Make virustotal data available as 'virustotal' for backward compatibility
+        if 'virustotal_data' in analysis_data and not analysis_data.get('virustotal_data', {}).get('error'):
+            analysis_data['virustotal'] = analysis_data['virustotal_data']
         
         # Generate timeline
-        timeline = generate_timeline(analysis_data)
-        analysis_data["timeline"] = timeline
+        # Ensure generate_timeline returns a list of dicts/TimelineEvent compatible items
+        timeline_events = generate_timeline(analysis_data) 
+        analysis_data["timeline"] = timeline_events
+
+        logger.info(f"Preparing to store final analysis_data for upload_id {upload_id}. VT date: {analysis_data.get('virustotal_data', {}).get('last_analysis_date')}, Risk score: {analysis_data.get('risk_score')}")
         
-        # Store in memory
-        active_sessions[upload_id] = analysis_data
+        # Store the comprehensive analysis data in active_sessions
+        # This includes all collected data, notes, tags, file_path etc.
+        active_sessions[upload_id] = analysis_data 
+        logger.info(f"Analysis for {upload_id} (domain: {domain}) stored successfully in active sessions.")
         
-        # Return the analysis response
-        return AnalysisResponse(**analysis_data)
-    
-    except Exception as e:
-        logger.error(f"Error analyzing domain: {e}")
-        raise HTTPException(status_code=500, detail=f"Error analyzing domain: {str(e)}")
+        # Prepare a payload strictly for the AnalysisResponse model
+        # Pydantic will validate fields and use defaults from the model if not provided
+        response_payload_data = {
+            "upload_id": analysis_data.get("upload_id"),
+            "domain": analysis_data.get("domain"),
+            "timestamp": analysis_data.get("timestamp", datetime.now()),
+            "risk_score": analysis_data.get("risk_score", 0),
+            "risk_summary": analysis_data.get("risk_summary", "Summary not available"),
+            "risk_factors": analysis_data.get("risk_factors", []),
+            "timeline": analysis_data.get("timeline", []),
+            "whois_data": analysis_data.get("whois_data"),
+            "dns_data": analysis_data.get("dns_data"),
+            "ssl_data": analysis_data.get("ssl_data"),
+            "virustotal_data": analysis_data.get("virustotal_data")
+            # file_path, notes, tags are not part of AnalysisResponse model, so not included here
+        }
+        
+        return AnalysisResponse(**response_payload_data)
+
+    except HTTPException: # Important to re-raise HTTPExceptions from called functions or FastAPI itself
+        raise
+    except Exception as e_analysis: # Catch all other exceptions during the analysis phase
+        import traceback
+        error_trace = traceback.format_exc()
+        logger.error(f"Critical error during analysis phase for upload_id {upload_id}, domain {domain}: {str(e_analysis)}\n{error_trace}")
+        
+        error_detail = f"Critical error during analysis: {str(e_analysis)}. Some data may be incomplete."
+        
+        # Store error information in active_sessions for the /analysis/{upload_id} endpoint
+        active_sessions[upload_id] = {
+            "upload_id": upload_id,
+            "domain": domain,
+            "timestamp": datetime.now(), # Time of failure
+            "error": error_detail,
+            "status": "failed_analysis",
+            "whois_data": analysis_data.get("whois_data"), # Store whatever was collected before failure
+            "dns_data": analysis_data.get("dns_data"),
+            "ssl_data": analysis_data.get("ssl_data"),
+            "virustotal_data": analysis_data.get("virustotal_data"),
+            "file_path": str(file_path) if 'file_path' in locals() and file_path else analysis_data.get("file_path"),
+            "notes": notes if 'notes' in locals() else analysis_data.get("notes"),
+            "tags": tags if 'tags' in locals() else analysis_data.get("tags")
+        }
+        logger.info(f"Stored error state for upload_id {upload_id} in active_sessions due to analysis failure.")
+        
+        # The /upload endpoint itself should signal an error to the client
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.get("/api/analysis/{upload_id}", response_model=AnalysisResponse)
+@app.get("/analysis/{upload_id}", response_model=AnalysisResponse)
 async def get_analysis(upload_id: str):
     """Get analysis results for a specific upload ID."""
+    logger.error(f"DIAGNOSTIC TEST - THIS IS THE UPDATED CODE - GET /analysis/{upload_id} called. Checking active_sessions.")
+    logger.info(f"GET /analysis/{upload_id} called. Checking active_sessions.")
     if upload_id not in active_sessions:
-        raise HTTPException(status_code=404, detail="Analysis not found")
+        current_keys = list(active_sessions.keys())
+        logger.warning(f"Upload ID '{upload_id}' not found in active_sessions. Current keys: {current_keys}")
+        raise HTTPException(status_code=404, detail="Analysis not found or processing incomplete.")
     
-    return active_sessions[upload_id]
+    analysis_data = active_sessions[upload_id]
+    logger.info(f"Found data for upload_id '{upload_id}'. Status: {analysis_data.get('status', 'completed')}, Keys: {list(analysis_data.keys())}")
+
+    if analysis_data.get("status") == "failed_analysis":
+        logger.error(f"Analysis for upload_id '{upload_id}' previously failed. Error: {analysis_data.get('error')}")
+        raise HTTPException(status_code=500, detail=f"Analysis previously failed: {analysis_data.get('error', 'Unknown error')}")
+
+    # Prepare a payload strictly for the AnalysisResponse model
+    response_payload = {
+        "upload_id": analysis_data.get("upload_id"),
+        "domain": analysis_data.get("domain"),
+        "timestamp": analysis_data.get("timestamp", datetime.now()),
+        "risk_score": analysis_data.get("risk_score", 0),
+        "risk_summary": analysis_data.get("risk_summary", "Summary not available"),
+        "risk_factors": analysis_data.get("risk_factors", []),
+        "timeline": analysis_data.get("timeline", []),
+        "whois_data": analysis_data.get("whois_data"),
+        "dns_data": analysis_data.get("dns_data"),
+        "ssl_data": analysis_data.get("ssl_data"),
+        "virustotal_data": analysis_data.get("virustotal_data")
+    }
+    logger.debug(f"Response payload: {response_payload}")
+    return AnalysisResponse(**response_payload)
 
 @app.post("/report/{upload_id}", response_model=ReportResponse)
 async def generate_report(upload_id: str):
@@ -1115,4 +1430,7 @@ async def cleanup():
 # Run the application
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8025)
+    # Use port 12345 to avoid conflicts
+    port = 12345
+    logger.info(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
