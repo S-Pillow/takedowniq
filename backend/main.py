@@ -602,18 +602,93 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
     # Fallback if something unexpected happens and no return was hit
     return {"error": "Unknown error in get_virustotal_data after API call attempt"}
 
+def calculate_vendor_risk_score(vt_detections, flagged_vendors, creation_date):
+    """Enhanced risk score calculation based on vendor reputation and detection patterns."""
+    def vt_score(detections):
+        if detections >= 30:
+            return 40
+        elif detections >= 20:
+            return 35
+        elif detections >= 15:
+            return 30
+        elif detections >= 10:
+            return 25
+        elif detections >= 5:
+            return 15
+        elif detections >= 1:
+            return 10
+        return 0
+
+    reputable_vendors = {
+        "ESET", "Kaspersky", "Sophos", "Fortinet", "BitDefender", "Avira",
+        "F-Secure", "TrendMicro", "Symantec", "McAfee", "Webroot", "G-Data"
+    }
+
+    def vendor_score(flagged_vendors):
+        flagged_reputable = reputable_vendors.intersection(set(flagged_vendors))
+        count = len(flagged_reputable)
+        if count >= 8:
+            return 30
+        elif count >= 6:
+            return 25
+        elif count >= 4:
+            return 20
+        elif count >= 2:
+            return 15
+        elif count >= 1:
+            return 10
+        return 0
+
+    def domain_age_score(creation_date):
+        try:
+            if isinstance(creation_date, datetime):
+                creation = creation_date
+            else:
+                # Try to parse the creation date string
+                creation = datetime.strptime(creation_date, "%Y-%m-%d")
+            
+            age_months = (datetime.utcnow().year - creation.year) * 12 + (datetime.utcnow().month - creation.month)
+            if age_months <= 1:
+                return 30
+            elif age_months <= 3:
+                return 25
+            elif age_months <= 6:
+                return 20
+            elif age_months <= 12:
+                return 15
+            elif age_months <= 36:
+                return 10
+            return 5
+        except Exception as e:
+            logger.warning(f"Error calculating domain age score: {e}")
+            return 0
+
+    vt = vt_score(vt_detections)
+    vendor = vendor_score(flagged_vendors)
+    age = domain_age_score(creation_date)
+    total_score = vt + vendor + age
+
+    risk_factors = []
+    if vt_detections > 0:
+        risk_factors.append({
+            "description": f"Domain flagged as malicious by {vt_detections} security vendors",
+            "severity": "high" if total_score >= 60 else "medium"
+        })
+
+    return total_score, risk_factors
+
 def calculate_risk_score(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
     """Calculate risk score and identify risk factors based on analysis data."""
     score = 0
     risk_factors = []
     
-    # Check domain age
+    # Check domain age for non-VT risk factors
     whois_data = analysis_data.get("whois_data", {})
+    creation_date = whois_data.get("creation_date")
+    domain_age_days = 365  # Default to 1 year if we can't calculate
+    
+    # Try to calculate domain age for display purposes
     if whois_data and not whois_data.get("error"):
-        creation_date = whois_data.get("creation_date")
-        domain_age_days = 365  # Default to 1 year if we can't calculate
-        
-        # Try to use domain_age if it's already calculated
         domain_age = whois_data.get("domain_age")
         if domain_age and domain_age != "Unknown":
             # If we have a calculated age string like "2 years, 3 months" or "5 days"
@@ -663,40 +738,21 @@ def calculate_risk_score(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
                         domain_age_days = (datetime.now(timezone.utc) - parsed_date).days
             except Exception as e:
                 logger.warning(f"Error calculating domain age days: {e}")
-        
-        # Apply risk scoring based on domain age
-        if domain_age_days < 30:
-            score += 30
-            risk_factors.append({
-                "description": f"Domain was registered recently ({domain_age_days} days ago)",
-                "severity": "high"
-            })
-        elif domain_age_days < 90:
-            score += 15
-            risk_factors.append({
-                "description": f"Domain is relatively new ({domain_age_days} days old)",
-                "severity": "medium"
-            })
     
-    # Check VirusTotal results
+    # Check VirusTotal results using the enhanced scoring function
     vt_data = analysis_data.get("virustotal_data", {})
     if vt_data and not vt_data.get("error"):
         malicious_count = vt_data.get("malicious_count", 0)
-        total_engines = vt_data.get("total_engines", 0)
         
-        if malicious_count > 0:
-            if malicious_count >= 3:
-                score += 40
-                risk_factors.append({
-                    "description": f"Domain flagged as malicious by {malicious_count} security vendors",
-                    "severity": "high"
-                })
-            else:
-                score += 20
-                risk_factors.append({
-                    "description": f"Domain flagged as malicious by {malicious_count} security vendors",
-                    "severity": "medium"
-                })
+        # Use the enhanced risk score calculation
+        vendor_risk_score, vt_risk_factors = calculate_vendor_risk_score(
+            malicious_count,
+            [d['engine'] for d in vt_data.get("detections", [])],
+            creation_date or "1970-01-01"
+        )
+        
+        score += vendor_risk_score
+        risk_factors.extend(vt_risk_factors)
     
     # Check SSL certificate
     ssl_data = analysis_data.get("ssl_data", {})
@@ -1066,6 +1122,46 @@ async def test_openai():
     except Exception as e:
         import traceback
         error_msg = f"Error testing OpenAI connection: {str(e)}"
+        logger.error(error_msg)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={"error": error_msg})
+
+@app.post("/api/test-risk")
+async def test_risk_assessment(request: Request):
+    """
+    Test endpoint for the improved risk assessment calculation.
+    """
+    try:
+        data = await request.json()
+        domain = data.get("domain", "example.com")
+        whois_data = data.get("whois_data", {})
+        virustotal_data = data.get("virustotal_data", {})
+        
+        # Extract the necessary data for the risk assessment
+        malicious_count = virustotal_data.get("malicious_count", 0)
+        flagged_vendors = [d["engine"] for d in virustotal_data.get("detections", [])]
+        creation_date = whois_data.get("creation_date", "1970-01-01")
+        
+        # Calculate the vendor risk score directly
+        vendor_score, vendor_factors = calculate_vendor_risk_score(
+            malicious_count,
+            flagged_vendors,
+            creation_date
+        )
+        
+        # Calculate the full risk assessment
+        risk_assessment = calculate_risk_score(data)
+        
+        return JSONResponse(content={
+            "status": "success",
+            "domain": domain,
+            "vendor_score": vendor_score,
+            "vendor_factors": vendor_factors,
+            "risk_assessment": risk_assessment
+        })
+    except Exception as e:
+        import traceback
+        error_msg = f"Error testing risk assessment: {str(e)}"
         logger.error(error_msg)
         logger.error(f"Traceback: {traceback.format_exc()}")
         return JSONResponse(status_code=500, content={"error": error_msg})
