@@ -68,71 +68,173 @@ You are an internet infrastructure analyst specializing in domain criticality as
 ## IMPORTANT: This is strictly a DISRUPTION IMPACT ANALYSIS, not a security or threat assessment.
 
 ## INPUT DATA:
-- Domain: {domain}
-- WHOIS: {whois_data}
-- DNS: {dns_data}
-- SSL: {ssl_data}
+- Domain: {domain} – Use your general knowledge and search your internal understanding of the internet to identify if this domain is publicly known or critical.
+- WHOIS: {whois_data} – Look for signs of organizational backing, domain age, and registrar reputation. Is an organization listed? Does the domain appear longstanding or newly registered?
+- DNS: {dns_data} – Evaluate whether the domain has real infrastructure: multiple records, MX entries (email usage), CNAMEs or records pointing to platforms like AWS, Google Cloud, or enterprise services. Are there signs of embedded services or external dependency?
+- SSL: {ssl_data} – Determine whether the certificate is valid, wildcarded, issued by a known authority, and supports subdomains. This can suggest professional infrastructure, but **SSL alone does not justify higher scores**.
 """
 
     output_format = """
 ## REQUIRED OUTPUT FORMAT:
 ```json
 {
-  "summary": "1-3 sentences describing the domain's role, audience, and relevance to global internet infrastructure.",
-  "disruption_impact_score": 5,
-  "news_impact_score": 5,
-  "rationale": "Explanation of the rationale for the scores discussing DNS traffic volume, critical systems usage, service dependencies, and difficulty to replace."
+  "summary": "1–3 sentence overview of what this domain appears to do and who might use it.",
+  "disruption_impact_score": 1,
+  "news_impact_score": 1,
+  "rationale": "Explain how critical this domain is to real-time services, infrastructure, or global operations. Discuss whether it's likely to be embedded in workflows, serve institutions, or impact public services. Consider user reach, business dependencies, and brand recognition."
 }
 ```
 
-## SCORING FRAMEWORK:
+---
 
-### Disruption Impact Score (1-10 scale):
-- 1-3: Minimal/localized - personal blogs, niche sites, or inactive domains
-- 4-6: Moderate - business tools, regional services, non-critical infrastructure
-- 7-8: High - high-traffic platforms, important APIs, financial or communication systems
-- 9-10: Catastrophic - root DNS, cloud/CDN providers, payment networks, global services
+## DETAILED DOMAIN IMPACT SCORING CRITERIA
 
-### News Impact Score (1-10 scale):
-- 1-3: Low - no coverage, tech forums only
-- 4-6: Notable - regional news, tech media, moderate online attention
-- 7-8: High - major tech press, mainstream media attention
-- 9-10: Global - widespread news, government statements, global trends
+### Disruption Impact Score (1–10)
 
-## CRITICAL SCORING INSTRUCTIONS - READ CAREFULLY:
+**Level 1: Minimal Localized Impact**
+- Personal blogs/websites with virtually no visitors
+- Inactive domains or placeholder sites
+- Domains used only for testing or development
+- No dependencies from other services
+- Content that is entirely duplicated elsewhere
 
-**You are NOT evaluating threat level or abuse potential. You are evaluating what would break if this domain was taken offline today.**
+**Level 2: Very Limited Impact**
+- Small personal/hobby websites with few daily visitors
+- Non-essential content repositories
+- Sites with complete functional equivalents readily available
+- Domains used primarily for email by a small number of users
+- Niche forums or communities with minimal active users
 
-You are scoring the **global and systemic impact of placing the domain on ServerHold/ClientHold** — which would remove its DNS records from the zone and make the site inaccessible.
+**Level 3: Minor Impact**
+- Small business websites serving as brochures
+- Low-traffic blogs or content sites (thousands of daily visitors)
+- Non-critical tools with many alternatives
+- Specialized content sites with limited but dedicated users
+- Sites without real-time requirements or dependencies
 
-## DOMAIN EVALUATION GUIDELINES:
+**Level 4: Moderate Local Impact** ⚠️
+- Regional service providers with moderate user bases
+- Small SaaS tools used by businesses but with alternatives
+- Specialized professional forums or communities
+- Secondary sites for larger organizations
+- Domains hosting resources referenced by other sites
 
-1. **For standard websites with basic configuration:**
-   - Evaluate based on their actual usage and dependencies
-   - Consider audience size, geographic reach, and service criticality
-   - A personal blog might score 1-2, while a regional news site might score 3-4
+**Level 5: Notable Sectoral Impact** ⚠️
+- Industry-specific platforms with substantial user bases
+- Medium-sized business services affecting workflows
+- Regional news or information portals
+- Specialized B2B services with industry importance
+- Sites with hundreds of thousands of daily users
 
-2. **For business and organizational domains:**
-   - Consider the number of users who rely on the service
-   - Evaluate the presence of email services, APIs, or embedded functionality
-   - Assess whether the domain hosts critical business functions
+**Level 6: Significant Regional Impact** ⚠️
+- Major regional services affecting millions
+- Business tools with significant market share
+- Secondary infrastructure components
+- Primary sites for large organizations
+- Services depended upon by smaller sites
 
-3. **For high-impact domains (scores 7-10):**
-   - These must demonstrate clear evidence of widespread usage
-   - Should support critical infrastructure (healthcare, education, government, financial)
-   - Must be essential for business continuity across multiple organizations
-   - Examples: major cloud providers, payment processors, communication platforms
+**Level 7: Major Impact** ⚠️
+- Major services with tens of millions of users
+- Critical business infrastructure affecting multiple industries
+- Popular communication platforms
+- Important financial services
+- Major cloud service components
 
-4. **News Impact Score:**
-   - Consider the domain's public profile and visibility
-   - Evaluate how widely the disruption would be reported
-   - Major platforms like social media sites would score 8-10
-   - Business services might score 4-7 depending on their prominence
-   - Personal or small business sites typically score 1-3
+**Level 8: Severe Impact** ⚠️
+- Global platforms with hundreds of millions of users
+- Critical infrastructure components
+- Major payment processors
+- Primary communication platforms for businesses
+- Services with few practical alternatives
 
-Even if a domain might be problematic in some ways, your task is to assess the real-world disruption that would occur if it went offline. For example, a major platform like Zoom would cause significant disruption if taken down, regardless of any other considerations.
+**Level 9: Critical Global Impact** ⚠️
+- Essential global platforms with billions of users
+- Critical internet infrastructure components
+- Major CDN providers
+- Primary global cloud services
+- Core financial infrastructure
 
-Base your evaluation on observable data and reasoned inference. Be conservative if data is unclear or incomplete. Return your analysis in a structured, professional tone suitable for automated tools and dashboards.
+**Level 10: Catastrophic Impact** ⚠️
+- Core internet infrastructure (DNS roots, global platforms)
+- Services relied on by billions daily
+- Cascading outages across internet services
+- Outages could threaten life safety or national security
+
+---
+
+### News Impact Score Criteria (1–10)
+
+**Level 1: Virtually Unnoticed**
+- No coverage outside specialized forums
+- Only noticed by site owners
+- No social media or search activity
+- No industry attention
+
+**Level 2: Minimal Notice**
+- Mentioned only in niche tech communities
+- Affected users might post about it
+- No coverage in tech publications
+
+**Level 3: Limited Awareness**
+- Discussed in industry forums or niche blogs
+- Scattered social media mentions
+- Might appear in specialized newsletters
+
+**Level 4: Notable Coverage** 📰
+- Coverage in technology news sites
+- Discussions across online communities
+- Industry publication mentions
+- Minor search interest spike
+
+**Level 5: Industry-Wide Coverage** 📰
+- Coverage in multiple tech publications
+- Trending in professional communities
+- Active social discussions
+- Brief mentions in mainstream tech outlets
+
+**Level 6: Broad Tech Coverage** 📰
+- Featured in major tech publications
+- Discussions extend to broader business media
+- Industry responses issued
+
+**Level 7: Mainstream Attention** 📰
+- Covered in mainstream media's tech sections
+- General news mentions
+- TV tech news segments
+- Widespread online chatter
+
+**Level 8: Major News Story** 📰
+- Prominent mainstream media coverage
+- Dedicated TV segments
+- Trending widely on social platforms
+- Official responses from major companies
+
+**Level 9: Global News Event** 📰
+- Breaking news on major outlets
+- Lead tech headlines globally
+- Government or regulatory response
+- Sustained global conversation
+
+**Level 10: Historic News Event** 📰
+- Top story globally
+- Media interruptions
+- Investigations launched
+- Future reference point in internet history
+
+---
+
+## CROSS-REFERENCING & CONTEXTUAL INFERENCE
+
+You may use your general internet knowledge and training to evaluate the domain beyond the input data:
+
+- Recognize public brands and services (e.g., `paypal.com`, `dropbox.com`, `zoom.us`, `microsoft.com`, `googleapis.com`)
+- Infer real-world impact based on brand familiarity, public usage, and ecosystem relevance
+- If the domain appears widely used or integrated into infrastructure, you may assign higher scores even if DNS/WHOIS data seems minimal
+
+Conversely, if the domain is unfamiliar, unbranded, and lacks visibility or infrastructure signs — **you must default to lower scores (1–3)**.
+
+When unsure, err on the side of underestimating rather than overstating impact.
+Return a structured, reasoned judgment in your response suitable for automated tools and executive dashboards.
 """
 
     prompt = input_data + output_format
