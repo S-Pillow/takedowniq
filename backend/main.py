@@ -1171,7 +1171,7 @@ async def test_risk_assessment(request: Request):
 async def chatgpt_impact(request: Request):
     """
     Receives domain analysis data and returns ChatGPT-based impact analysis and scores.
-    Expects JSON body with at least: domain, whois_data, dns_data, ssl_data, virustotal_data.
+    Expects JSON body with at least: domain, whois_data, dns_data, ssl_data.
     """
     try:
         logger.info("ChatGPT impact analysis endpoint called")
@@ -1179,12 +1179,17 @@ async def chatgpt_impact(request: Request):
         logger.info(f"Received data for domain: {data.get('domain', 'unknown')}")
         
         # Check if we have the required fields
-        required_fields = ['domain', 'whois_data', 'dns_data', 'ssl_data', 'virustotal_data']
+        required_fields = ['domain', 'whois_data', 'dns_data', 'ssl_data']
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
             logger.error(f"Missing required fields in request: {missing_fields}")
             return JSONResponse(status_code=400, content={"error": f"Missing required fields: {', '.join(missing_fields)}"})
+            
+        # Remove VirusTotal data if present (we no longer use it for impact analysis)
+        if 'virustotal_data' in data:
+            logger.info("Removing VirusTotal data from ChatGPT impact analysis input")
+            data.pop('virustotal_data')
         
         # Call the analyze_domain_impact function
         logger.info("Calling analyze_domain_impact function")

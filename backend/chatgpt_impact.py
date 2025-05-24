@@ -47,7 +47,7 @@ def analyze_domain_impact(domain_data: Dict[str, Any]) -> Dict[str, Any]:
         logger.error("Empty domain data provided to analyze_domain_impact")
         return {"error": "No domain data provided for analysis"}
 
-    required_fields = ['domain', 'whois_data', 'dns_data', 'ssl_data', 'virustotal_data']
+    required_fields = ['domain', 'whois_data', 'dns_data', 'ssl_data']
     missing_fields = [field for field in required_fields if field not in domain_data]
     if missing_fields:
         logger.error(f"Missing required fields in domain data: {missing_fields}")
@@ -61,17 +61,17 @@ def analyze_domain_impact(domain_data: Dict[str, Any]) -> Dict[str, Any]:
     whois_data = domain_data.get("whois_data", {})
     dns_data = domain_data.get("dns_data", {})
     ssl_data = domain_data.get("ssl_data", {})
-    virustotal_data = domain_data.get("virustotal_data", {})
 
     input_data = f"""
-You are a cybersecurity and internet infrastructure analyst. Your task is to assess the global disruption impact and public news relevance if the following domain were placed on ServerHold or ClientHold status. Use the provided technical and contextual data to form a concise, structured, and professionally grounded analysis.
+You are an internet infrastructure analyst specializing in domain criticality assessment. Your task is to evaluate the real-world disruption impact and potential news visibility if the following domain were suddenly taken offline through ServerHold or ClientHold status.
+
+## IMPORTANT: This is strictly a DISRUPTION IMPACT ANALYSIS, not a security or threat assessment.
 
 ## INPUT DATA:
 - Domain: {domain}
 - WHOIS: {whois_data}
 - DNS: {dns_data}
 - SSL: {ssl_data}
-- VirusTotal: {virustotal_data}
 """
 
     output_format = """
@@ -81,7 +81,7 @@ You are a cybersecurity and internet infrastructure analyst. Your task is to ass
   "summary": "1-3 sentences describing the domain's role, audience, and relevance to global internet infrastructure.",
   "disruption_impact_score": 5,
   "news_impact_score": 5,
-  "rationale": "Explanation of the rationale for the scores discussing DNS traffic volume, critical systems usage, service dependencies, and difficulty to replace. Include references to malware findings or SSL issues if relevant."
+  "rationale": "Explanation of the rationale for the scores discussing DNS traffic volume, critical systems usage, service dependencies, and difficulty to replace."
 }
 ```
 
@@ -101,35 +101,36 @@ You are a cybersecurity and internet infrastructure analyst. Your task is to ass
 
 ## CRITICAL SCORING INSTRUCTIONS - READ CAREFULLY:
 
-You are NOT scoring how harmful or malicious this domain is.
+**You are NOT evaluating threat level or abuse potential. You are evaluating what would break if this domain was taken offline today.**
 
 You are scoring the **global and systemic impact of placing the domain on ServerHold/ClientHold** — which would remove its DNS records from the zone and make the site inaccessible.
 
-## MANDATORY SCORING RULES (THESE OVERRIDE ALL OTHER CONSIDERATIONS):
+## DOMAIN EVALUATION GUIDELINES:
 
-1. **IF the domain has ANY malicious or phishing detections in VirusTotal data:**
-   - **YOU MUST ASSIGN A DISRUPTION IMPACT SCORE OF 1 OR 2**
-   - No exceptions, regardless of other signals like SSL certificates or SPF records
-   - This is because malicious domains do not provide legitimate services that would be disrupted
+1. **For standard websites with basic configuration:**
+   - Evaluate based on their actual usage and dependencies
+   - Consider audience size, geographic reach, and service criticality
+   - A personal blog might score 1-2, while a regional news site might score 3-4
 
-2. **IF the domain has no malicious detections BUT is a standard website with basic configuration:**
-   - **YOU MUST ASSIGN A DISRUPTION IMPACT SCORE OF 2-3**
-   - Standard websites do not qualify for scores of 4 or higher
+2. **For business and organizational domains:**
+   - Consider the number of users who rely on the service
+   - Evaluate the presence of email services, APIs, or embedded functionality
+   - Assess whether the domain hosts critical business functions
 
-3. **ONLY domains with ALL of these characteristics qualify for scores above 5:**
-   - Confirmed critical infrastructure (healthcare, education, government, financial)
-   - Demonstrable widespread usage by large audiences
-   - Essential for business continuity across multiple organizations
-   - No malicious detections whatsoever
+3. **For high-impact domains (scores 7-10):**
+   - These must demonstrate clear evidence of widespread usage
+   - Should support critical infrastructure (healthcare, education, government, financial)
+   - Must be essential for business continuity across multiple organizations
+   - Examples: major cloud providers, payment processors, communication platforms
 
 4. **News Impact Score:**
-   - Standard domains: 1-2
-   - Domains with malicious detections: 2-3 (only higher if part of a major campaign)
-   - Only assign scores above 5 for domains that would make national headlines if disrupted
+   - Consider the domain's public profile and visibility
+   - Evaluate how widely the disruption would be reported
+   - Major platforms like social media sites would score 8-10
+   - Business services might score 4-7 depending on their prominence
+   - Personal or small business sites typically score 1-3
 
-These rules are absolute and must be followed precisely. When in doubt, score lower.
-
-Base your response on the **impact of disrupting the domain**, not its intent or content.
+Even if a domain might be problematic in some ways, your task is to assess the real-world disruption that would occur if it went offline. For example, a major platform like Zoom would cause significant disruption if taken down, regardless of any other considerations.
 
 Base your evaluation on observable data and reasoned inference. Be conservative if data is unclear or incomplete. Return your analysis in a structured, professional tone suitable for automated tools and dashboards.
 """
