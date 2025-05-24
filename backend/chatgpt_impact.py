@@ -69,7 +69,7 @@ You are an internet infrastructure analyst specializing in domain criticality as
 
 ## INPUT DATA:
 - Domain: {domain} – Use your general knowledge and search your internal understanding of the internet to identify if this domain is publicly known or critical.
-- WHOIS: {whois_data} – Look for signs of organizational backing, domain age, and registrar reputation. Is an organization listed? Does the domain appear longstanding or newly registered?
+- WHOIS: {whois_data} – **DOMAIN AGE IS CRITICAL** - Newly registered domains (less than 1 year old) almost always have minimal disruption impact (score 1-2) as they haven't had time to become embedded in critical systems. Look for organizational backing and registrar reputation. Is an established organization listed?
 - DNS: {dns_data} – Evaluate whether the domain has real infrastructure: multiple records, MX entries (email usage), CNAMEs or records pointing to platforms like AWS, Google Cloud, or enterprise services. Are there signs of embedded services or external dependency?
 - SSL: {ssl_data} – Determine whether the certificate is valid, wildcarded, issued by a known authority, and supports subdomains. This can suggest professional infrastructure, but **SSL alone does not justify higher scores**.
 """
@@ -223,6 +223,17 @@ You are an internet infrastructure analyst specializing in domain criticality as
 
 ---
 
+## DOMAIN AGE LIMITING FACTORS
+
+**IMPORTANT: Domain age is a HARD LIMITING FACTOR for disruption impact scores:**
+
+- Domains less than 1 year old: **MAXIMUM SCORE OF 2** regardless of other factors
+- Domains 1-2 years old: **MAXIMUM SCORE OF 4** regardless of other factors
+- Domains 2-5 years old: **MAXIMUM SCORE OF 6** unless clear evidence of critical infrastructure
+- Domains 5+ years old: May receive higher scores based on other factors
+
+The only exception would be for known, major services that have migrated to a new domain (e.g., a major bank or government service), which must be clearly identified in your rationale.
+
 ## CROSS-REFERENCING & CONTEXTUAL INFERENCE
 
 You may use your general internet knowledge and training to evaluate the domain beyond the input data:
@@ -232,6 +243,8 @@ You may use your general internet knowledge and training to evaluate the domain 
 - If the domain appears widely used or integrated into infrastructure, you may assign higher scores even if DNS/WHOIS data seems minimal
 
 Conversely, if the domain is unfamiliar, unbranded, and lacks visibility or infrastructure signs — **you must default to lower scores (1–3)**.
+
+**Remember: A new domain (less than 1 year old) CANNOT have a disruption impact score above 2.**
 
 When unsure, err on the side of underestimating rather than overstating impact.
 Return a structured, reasoned judgment in your response suitable for automated tools and executive dashboards.
