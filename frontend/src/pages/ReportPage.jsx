@@ -21,8 +21,42 @@ export default function ReportPage() {
   useEffect(() => {
     const fetchReport = async () => {
       try {
-        const response = await axios.get(`/tools/takedowniq/api/report/${reportId}`);
-        setReport(response.data);
+        // Check if this is a mock report ID
+        if (reportId.startsWith('mock-')) {
+          // Get mock data from localStorage
+          const mockData = localStorage.getItem(`report_${reportId}`);
+          if (mockData) {
+            const parsedData = JSON.parse(mockData);
+            
+            // If we don't have full report data, get the analysis data to fill in details
+            if (!parsedData.risk_factors) {
+              const analysisData = localStorage.getItem(`analysis_${parsedData.upload_id}`);
+              if (analysisData) {
+                const analysis = JSON.parse(analysisData);
+                // Merge analysis data with report data
+                setReport({
+                  ...parsedData,
+                  domain: analysis.domain,
+                  risk_score: analysis.risk_score,
+                  risk_factors: analysis.risk_factors,
+                  whois: analysis.whois_data,
+                  virustotal: analysis.virustotal_data
+                });
+              } else {
+                setReport(parsedData);
+              }
+            } else {
+              setReport(parsedData);
+            }
+            console.log('Using mock data for report:', reportId);
+          } else {
+            throw new Error('Mock report data not found');
+          }
+        } else {
+          // For real data, make the actual API call
+          const response = await axios.get(`/tools/takedowniq/api/report/${reportId}`);
+          setReport(response.data);
+        }
         setLoading(false);
       } catch (err) {
         console.error('Error fetching report:', err);
@@ -39,18 +73,63 @@ export default function ReportPage() {
     setDownloading(true);
     
     try {
-      const response = await axios.get(`/tools/takedowniq/api/report/${reportId}/download`, {
-        responseType: 'blob'
-      });
-      
-      // Create a download link and trigger it
-      const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', `TakedownIQ-Report-${report.domain}.pdf`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      // For mock reports, create a simple PDF-like blob with text content
+      if (reportId.startsWith('mock-')) {
+        // Simulate API delay
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Create a simple text blob that looks like a PDF report
+        const mockReportContent = `
+          TakedownIQ Analysis Report
+          ========================
+          
+          Domain: ${report.domain}
+          Generated on: ${new Date().toLocaleString()}
+          
+          Risk Score: ${report.risk_score}/100
+          
+          Risk Factors:
+          ${report.risk_factors ? report.risk_factors.map(factor => `- ${factor}`).join('\n') : 'None identified'}
+          
+          Domain Information:
+          - Registration Date: ${report.whois?.creation_date || 'Unknown'}
+          - Expiration Date: ${report.whois?.expiration_date || 'Unknown'}
+          - Domain Age: ${report.whois?.domain_age || 'Unknown'}
+          - Registrar: ${report.whois?.registrar || 'Unknown'}
+          
+          VirusTotal Results:
+          - Malicious: ${report.virustotal?.malicious_count || 0}
+          - Suspicious: ${report.virustotal?.suspicious_count || 0}
+          - Harmless: ${report.virustotal?.harmless_count || 0}
+          - Total Engines: ${report.virustotal?.total_engines || 0}
+          
+          This is a mock report generated for demonstration purposes.
+        `;
+        
+        // Create a download link and trigger it
+        const blob = new Blob([mockReportContent], { type: 'text/plain' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `TakedownIQ-Mock-Report-${report.domain}.txt`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } else {
+        // For real reports, make the actual API call
+        const response = await axios.get(`/tools/takedowniq/api/report/${reportId}/download`, {
+          responseType: 'blob'
+        });
+        
+        // Create a download link and trigger it
+        const url = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `TakedownIQ-Report-${report.domain}.pdf`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
       
       setDownloading(false);
     } catch (err) {
@@ -252,7 +331,7 @@ export default function ReportPage() {
         
         {/* Actions */}
         <div className="flex justify-between">
-          <Link to={`/analysis/${report.upload_id}`} className="btn-secondary">
+          <Link to={`/analysis/${report.analysis_id}`} className="btn-secondary">
             <ArrowLeftIcon className="h-5 w-5 mr-2" />
             Back to Analysis
           </Link>

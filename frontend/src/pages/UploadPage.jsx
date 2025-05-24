@@ -11,7 +11,7 @@ import {
   CameraIcon,
   ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
-import ScreenshotTool from '../components/ScreenshotTool';
+
 
 export default function UploadPage() {
   const navigate = useNavigate();
@@ -21,8 +21,7 @@ export default function UploadPage() {
   const [notes, setNotes] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
-  const [showScreenshotTool, setShowScreenshotTool] = useState(false);
-  const [useMockMode, setUseMockMode] = useState(localStorage.getItem('useMockMode') === 'true');
+
   const formRef = useRef(null);
 
   // Handle file drop
@@ -63,34 +62,10 @@ export default function UploadPage() {
     maxFiles: 1
   });
 
-  // Handle screenshot capture
-  const handleScreenshotCaptured = (screenshotBlob) => {
-    setShowScreenshotTool(false);
-    
-    // Create a File object from the Blob
-    const screenshotFile = new File([screenshotBlob], 'screenshot.png', { type: 'image/png' });
-    setFile(screenshotFile);
-    
-    // Create preview
-    const reader = new FileReader();
-    reader.onload = () => {
-      setFilePreview(reader.result);
-    };
-    reader.readAsDataURL(screenshotBlob);
-  };
-
   // Handle removing the file
   const handleRemoveFile = () => {
     setFile(null);
     setFilePreview(null);
-  };
-
-  // Handle mock mode toggle
-  const handleToggleMockMode = () => {
-    const newMode = !useMockMode;
-    setUseMockMode(newMode);
-    localStorage.setItem('useMockMode', newMode.toString());
-    console.log('Mock mode set to:', newMode);
   };
 
   // Handle form submission
@@ -105,121 +80,69 @@ export default function UploadPage() {
     setIsUploading(true);
     setUploadError(null);
     
-    // Use the state value for mock mode
-    console.log('Using mock mode:', useMockMode);
-    
     try {
-      if (useMockMode) {
-        // MOCK IMPLEMENTATION FOR TESTING
-        console.log('Mock upload for domain:', domain);
-        console.log('File:', file.name, file.size, file.type);
-        
-        // Simulate API processing time
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        // Generate a mock upload ID
-        const mockUploadId = 'mock-' + Math.random().toString(36).substring(2, 15);
-        
-        // Store mock data in localStorage for the analysis page to use
-        const mockAnalysisData = {
-          upload_id: mockUploadId,
-          domain: domain,
-          timestamp: new Date().toISOString(),
-          whois_data: {
-            registrar: 'Mock Registrar Inc.',
-            creation_date: '2020-01-01',
-            expiration_date: '2025-01-01',
-            status: ['clientTransferProhibited'],
-            domain_age: '3 years, 4 months'
-          },
-          virustotal_data: {
-            malicious_count: 2,
-            suspicious_count: 1,
-            harmless_count: 75,
-            undetected_count: 12,
-            total_engines: 90,
-            detections: [
-              { engine: 'MockAV-1', category: 'malicious', result: 'phishing' },
-              { engine: 'MockAV-2', category: 'malicious', result: 'malware' },
-              { engine: 'MockAV-3', category: 'suspicious', result: 'suspicious' }
-            ],
-            categories: {
-              'MockCat': 'phishing',
-              'MockDB': 'suspicious'
-            },
-            last_analysis_date: Math.floor(Date.now() / 1000) - 86400 // yesterday
-          },
-          risk_score: 65,
-          risk_factors: [
-            'Domain is less than 1 year old',
-            'Domain has been flagged by 2 security vendors'
-          ],
-          notes: notes || ''
-        };
-        
-        // Store in localStorage
-        localStorage.setItem(`analysis_${mockUploadId}`, JSON.stringify(mockAnalysisData));
-        
-        // Navigate to analysis page with the mock upload ID
-        navigate(`/analysis/${mockUploadId}`);
-      } else {
-        // REAL API IMPLEMENTATION
-        // Create form data
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('domain', domain);
-        if (notes) {
-          formData.append('notes', notes);
-        }
-        
-        // Use a longer timeout for large files
-        const timeout = 60000; // 60 seconds
-        
-        // Try different API endpoints
-        let response;
-        let error;
-        
+      // Create form data
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('domain', domain);
+      if (notes) {
+        formData.append('notes', notes);
+      }
+      
+      // Use a longer timeout for large files
+      const timeout = 60000; // 60 seconds
+      
+      let uploadResponse;
+      
+      try {
         // First try the proxy endpoint
+        console.log('Trying proxy endpoint: /tools/takedowniq/api/upload');
+        uploadResponse = await axios.post('/tools/takedowniq/api/upload', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+          timeout
+        });
+      } catch (proxyErr) {
+        console.error('Proxy endpoint failed:', proxyErr);
+        
         try {
-          console.log('Trying proxy endpoint: /tools/takedowniq/api/upload');
-          response = await axios.post('/tools/takedowniq/api/upload', formData, {
+          // If proxy fails, try direct endpoint
+          console.log('Trying direct endpoint: http://69.62.66.176:12345/upload');
+          uploadResponse = await axios.post('http://69.62.66.176:12345/upload', formData, {
             headers: {
               'Content-Type': 'multipart/form-data',
             },
-            timeout: timeout,
-            maxContentLength: 10 * 1024 * 1024, // 10MB
-            maxBodyLength: 10 * 1024 * 1024, // 10MB
+            timeout
           });
-        } catch (err) {
-          console.error('Proxy endpoint failed:', err);
-          error = err;
+        } catch (directErr) {
+          console.error('Direct endpoint failed:', directErr);
           
-          // If proxy fails, try direct endpoint
           try {
-            console.log('Trying direct endpoint: http://69.62.66.176:12345/upload');
-            response = await axios.post('http://69.62.66.176:12345/upload', formData, {
+            // If direct endpoint fails, try another fallback
+            console.log('Trying fallback endpoint');
+            uploadResponse = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/api/upload`, formData, {
               headers: {
                 'Content-Type': 'multipart/form-data',
               },
-              timeout: timeout,
-              maxContentLength: 10 * 1024 * 1024, // 10MB
-              maxBodyLength: 10 * 1024 * 1024, // 10MB
+              timeout
             });
-          } catch (directErr) {
-            console.error('Direct endpoint failed:', directErr);
-            // If both fail, throw the original error
-            throw error;
+          } catch (fallbackErr) {
+            console.error('Fallback endpoint failed:', fallbackErr);
+            // If all attempts fail, throw the last error
+            throw fallbackErr;
           }
         }
-        
-        console.log('Upload successful:', response.data);
-        
-        // Navigate to analysis page with the upload ID
-        if (response.data && response.data.upload_id) {
-          navigate(`/analysis/${response.data.upload_id}`);
-        } else {
-          throw new Error('Invalid response from server: missing upload_id');
-        }
+      }
+      
+      console.log('Upload successful:', uploadResponse.data);
+      
+      // Check if we have a valid response with upload_id
+      if (uploadResponse.data && uploadResponse.data.upload_id) {
+        // Navigate to the analysis page
+        navigate(`/analysis/${uploadResponse.data.upload_id}`);
+      } else {
+        throw new Error('Invalid response from server: missing upload_id');
       }
     } catch (error) {
       console.error('Upload error:', error);
@@ -311,17 +234,7 @@ export default function UploadPage() {
                   </div>
                 </div>
                 
-                <div className="mt-4 text-center">
-                  <p className="text-sm text-gray-500">Or use our built-in tool</p>
-                  <button
-                    type="button"
-                    onClick={() => setShowScreenshotTool(true)}
-                    className="mt-2 btn-secondary"
-                  >
-                    <CameraIcon className="h-5 w-5 mr-2" />
-                    Capture Screenshot
-                  </button>
-                </div>
+
               </div>
             ) : (
               <div className="mt-2 rounded-lg border border-gray-300 bg-white p-4">
@@ -401,22 +314,7 @@ export default function UploadPage() {
             </div>
           )}
 
-          {/* Mock Mode Toggle */}
-          <div className="mt-4 flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-700">
-              {useMockMode ? 'Using Mock Mode (No Backend)' : 'Using Real API'}
-            </span>
-            <button
-              type="button"
-              className={`relative inline-flex h-6 w-11 items-center rounded-full ${useMockMode ? 'bg-blue-600' : 'bg-gray-200'}`}
-              onClick={handleToggleMockMode}
-            >
-              <span className="sr-only">Toggle Mock Mode</span>
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${useMockMode ? 'translate-x-6' : 'translate-x-1'}`}
-              />
-            </button>
-          </div>
+
 
           <div className="mt-6">
             <button
@@ -440,13 +338,7 @@ export default function UploadPage() {
         </form>
       </motion.div>
 
-      {/* Screenshot tool modal */}
-      {showScreenshotTool && (
-        <ScreenshotTool
-          onScreenshotCaptured={handleScreenshotCaptured}
-          onCancel={() => setShowScreenshotTool(false)}
-        />
-      )}
+
     </div>
   );
 }
