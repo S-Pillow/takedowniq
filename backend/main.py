@@ -603,7 +603,10 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
     return {"error": "Unknown error in get_virustotal_data after API call attempt"}
 
 def calculate_vendor_risk_score(vt_detections, flagged_vendors, creation_date):
-    """Enhanced risk score calculation based on vendor reputation and detection patterns."""
+    """Enhanced risk score calculation based on vendor reputation and detection patterns.
+    Implements a weighted scoring system that gives higher importance to well-established
+    security vendors based on their industry reputation and reliability.
+    """
     def vt_score(detections):
         if detections >= 30:
             return 40
@@ -619,23 +622,55 @@ def calculate_vendor_risk_score(vt_detections, flagged_vendors, creation_date):
             return 10
         return 0
 
-    reputable_vendors = {
-        "ESET", "Kaspersky", "Sophos", "Fortinet", "BitDefender", "Avira",
-        "F-Secure", "TrendMicro", "Symantec", "McAfee", "Webroot", "G-Data"
+    # Define vendor tiers with different weights
+    # Tier 1: Highest reputation vendors (weight 3)
+    tier1_vendors = {
+        "Kaspersky", "Symantec", "Microsoft", "ESET"
     }
-
-    def vendor_score(flagged_vendors):
-        flagged_reputable = reputable_vendors.intersection(set(flagged_vendors))
-        count = len(flagged_reputable)
-        if count >= 8:
+    
+    # Tier 2: Well-established vendors (weight 2)
+    tier2_vendors = {
+        "BitDefender", "Sophos", "Fortinet", "McAfee", 
+        "TrendMicro", "F-Secure", "CrowdStrike", "Palo Alto Networks"
+    }
+    
+    # Tier 3: Other reputable vendors (weight 1)
+    tier3_vendors = {
+        "Avira", "Webroot", "G-Data", "Avast", "AVG", "Malwarebytes",
+        "SentinelOne", "Cylance", "Emsisoft", "Comodo", "AhnLab"
+    }
+    
+    # All reputable vendors (for backward compatibility)
+    reputable_vendors = tier1_vendors.union(tier2_vendors).union(tier3_vendors)
+    
+    def weighted_vendor_score(flagged_vendors):
+        # Convert flagged_vendors to a set for efficient lookups
+        flagged_set = set(flagged_vendors)
+        
+        # Calculate weighted score based on vendor tiers
+        tier1_detections = tier1_vendors.intersection(flagged_set)
+        tier2_detections = tier2_vendors.intersection(flagged_set)
+        tier3_detections = tier3_vendors.intersection(flagged_set)
+        
+        # Apply weights to each tier
+        weighted_count = (len(tier1_detections) * 3) + (len(tier2_detections) * 2) + len(tier3_detections)
+        
+        # Log the weighted detection information
+        logger.info(f"Weighted vendor detections: Tier 1: {len(tier1_detections)} (weight 3), "
+                   f"Tier 2: {len(tier2_detections)} (weight 2), "
+                   f"Tier 3: {len(tier3_detections)} (weight 1), "
+                   f"Total weighted count: {weighted_count}")
+        
+        # Calculate score based on weighted count
+        if weighted_count >= 12:  # Equivalent to 4 Tier 1 vendors
             return 30
-        elif count >= 6:
+        elif weighted_count >= 9:  # Equivalent to 3 Tier 1 vendors
             return 25
-        elif count >= 4:
+        elif weighted_count >= 6:  # Equivalent to 2 Tier 1 vendors
             return 20
-        elif count >= 2:
+        elif weighted_count >= 3:  # Equivalent to 1 Tier 1 vendor
             return 15
-        elif count >= 1:
+        elif weighted_count >= 1:  # At least one lower-tier vendor
             return 10
         return 0
 
@@ -664,7 +699,7 @@ def calculate_vendor_risk_score(vt_detections, flagged_vendors, creation_date):
             return 0
 
     vt = vt_score(vt_detections)
-    vendor = vendor_score(flagged_vendors)
+    vendor = weighted_vendor_score(flagged_vendors)
     age = domain_age_score(creation_date)
     total_score = vt + vendor + age
 
