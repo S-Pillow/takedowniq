@@ -90,52 +90,98 @@ export default function UploadPage() {
       }
       
       // Use a longer timeout for large files
-      const timeout = 60000; // 60 seconds
+      const timeout = 90000; // 90 seconds for large files or slow connections
       
       let uploadResponse;
+      let errorDetails = {
+        proxy: null,
+        direct: null,
+        fallback: null
+      };
       
       try {
-        // First try the proxy endpoint
+        // Try all endpoints in sequence until one works
         console.log('Trying proxy endpoint: /tools/takedowniq/api/upload');
-        uploadResponse = await axios.post('/tools/takedowniq/api/upload', formData, {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-          timeout
-        });
-      } catch (proxyErr) {
-        console.error('Proxy endpoint failed:', proxyErr);
-        
         try {
-          // If proxy fails, try direct endpoint
-          console.log('Trying direct endpoint: http://69.62.66.176:12345/upload');
-          uploadResponse = await axios.post('http://69.62.66.176:12345/upload', formData, {
+          uploadResponse = await axios.post('/tools/takedowniq/api/upload', formData, {
             headers: {
               'Content-Type': 'multipart/form-data',
             },
             timeout
           });
-        } catch (directErr) {
-          console.error('Direct endpoint failed:', directErr);
+          console.log('Proxy endpoint succeeded');
+          // If we get here, the proxy endpoint worked
+        } catch (proxyErr) {
+          // Log detailed error information for debugging
+          console.error('Proxy endpoint failed:', proxyErr);
+          errorDetails.proxy = {
+            message: proxyErr.message,
+            status: proxyErr.response?.status,
+            statusText: proxyErr.response?.statusText,
+            data: proxyErr.response?.data
+          };
+          console.log('Proxy error details:', JSON.stringify(errorDetails.proxy));
           
+          // If proxy fails, try direct endpoint
+          console.log('Trying direct endpoint: http://69.62.66.176:12345/upload');
           try {
-            // If direct endpoint fails, try another fallback
-            console.log('Trying fallback endpoint');
-            uploadResponse = await axios.post(`${import.meta.env.VITE_API_BASE_URL}/api/upload`, formData, {
+            uploadResponse = await axios.post('http://69.62.66.176:12345/upload', formData, {
               headers: {
                 'Content-Type': 'multipart/form-data',
               },
               timeout
             });
-          } catch (fallbackErr) {
-            console.error('Fallback endpoint failed:', fallbackErr);
-            // If all attempts fail, throw the last error
-            throw fallbackErr;
+            console.log('Direct endpoint succeeded');
+            // If we get here, the direct endpoint worked
+          } catch (directErr) {
+            console.error('Direct endpoint failed:', directErr);
+            errorDetails.direct = {
+              message: directErr.message,
+              status: directErr.response?.status,
+              statusText: directErr.response?.statusText,
+              data: directErr.response?.data
+            };
+            console.log('Direct error details:', JSON.stringify(errorDetails.direct));
+            
+            // If direct endpoint fails, try another fallback
+            const fallbackUrl = `${import.meta.env.VITE_API_BASE_URL || 'https://api.takedowniq.com'}/api/upload`;
+            console.log(`Trying fallback endpoint: ${fallbackUrl}`);
+            try {
+              uploadResponse = await axios.post(fallbackUrl, formData, {
+                headers: {
+                  'Content-Type': 'multipart/form-data',
+                },
+                timeout
+              });
+              console.log('Fallback endpoint succeeded');
+              // If we get here, the fallback endpoint worked
+            } catch (fallbackErr) {
+              console.error('Fallback endpoint failed:', fallbackErr);
+              errorDetails.fallback = {
+                message: fallbackErr.message,
+                status: fallbackErr.response?.status,
+                statusText: fallbackErr.response?.statusText,
+                data: fallbackErr.response?.data
+              };
+              console.log('Fallback error details:', JSON.stringify(errorDetails.fallback));
+              
+              // If all attempts fail, throw a comprehensive error
+              const err = new Error('All API endpoints failed');
+              err.details = errorDetails;
+              throw err;
+            }
           }
         }
+        
+        // If we get here, one of the endpoints worked
+        console.log('Upload successful:', uploadResponse.data);
+      } catch (error) {
+        // This catch block handles any errors that weren't caught by the nested try-catch blocks
+        console.error('Unexpected error during upload attempts:', error);
+        throw error; // Re-throw to be caught by the outer try-catch
       }
       
-      console.log('Upload successful:', uploadResponse.data);
+      // This is now outside the try-catch block for the endpoint attempts
       
       // Check if we have a valid response with upload_id
       if (uploadResponse.data && uploadResponse.data.upload_id) {
@@ -150,9 +196,49 @@ export default function UploadPage() {
       // Handle different error types
       if (error.message === 'Network Error') {
         setUploadError('Network error. Please check your connection and try again. Make sure the backend server is running.');
+      } else if (error.message === 'All API endpoints failed') {
+        // This is our custom error for when all endpoints fail
+        const details = error.details || {};
+        
+        // Create a detailed error message with diagnostic information
+        let errorMessage = 'Connection to all API endpoints failed. ';
+        
+        // Add specific error details if available
+        if (details.proxy?.status === 502) {
+          errorMessage += 'The proxy server returned a 502 Bad Gateway error. This usually means the backend server is unreachable. ';
+        } else if (details.direct?.message?.includes('Content Security Policy')) {
+          errorMessage += 'Direct connection was blocked by Content Security Policy. ';
+        }
+        
+        // Add general troubleshooting advice
+        errorMessage += 'Please try again later or contact support with the following diagnostic information.';
+        
+        setUploadError(errorMessage);
+        
+        // Log the complete error details to the console for support
+        console.error('Complete API failure details:', JSON.stringify(error.details, null, 2));
       } else if (error.response) {
         // Server responded with an error status code
-        const errorMessage = error.response.data?.detail || `Server error: ${error.response.status}`;
+        const status = error.response.status;
+        let errorMessage;
+        
+        // Provide more helpful messages based on status code
+        if (status === 400) {
+          errorMessage = 'The server rejected the request. Please check your input and try again.';
+        } else if (status === 401 || status === 403) {
+          errorMessage = 'Authentication error. You may need to log in again.';
+        } else if (status === 404) {
+          errorMessage = 'The requested resource was not found on the server.';
+        } else if (status === 413) {
+          errorMessage = 'The file you are trying to upload is too large. Please try a smaller file (max 10MB).';
+        } else if (status === 429) {
+          errorMessage = 'Too many requests. Please wait a moment and try again.';
+        } else if (status >= 500) {
+          errorMessage = 'The server encountered an error. Please try again later.';
+        } else {
+          errorMessage = error.response.data?.detail || `Server error: ${status}`;
+        }
+        
         setUploadError(errorMessage);
       } else if (error.request) {
         // Request was made but no response received
@@ -297,17 +383,63 @@ export default function UploadPage() {
                 <div className="flex-shrink-0">
                   <ExclamationTriangleIcon className="h-5 w-5 text-red-400" aria-hidden="true" />
                 </div>
-                <div className="ml-3">
+                <div className="ml-3 w-full">
                   <h3 className="text-sm font-medium text-red-800">Upload Error</h3>
                   <div className="mt-2 text-sm text-red-700">
-                    <p>{uploadError}</p>
+                    <p className="font-medium">{uploadError}</p>
+                    
+                    {/* Network error troubleshooting */}
                     {uploadError.includes('Network error') && (
-                      <ul className="list-disc pl-5 mt-2 space-y-1 text-xs">
-                        <li>Check your internet connection</li>
-                        <li>The server might be temporarily unavailable</li>
-                        <li>Try refreshing the page and uploading again</li>
-                      </ul>
+                      <div className="mt-3 bg-white p-3 rounded border border-red-100">
+                        <h4 className="text-xs font-semibold uppercase tracking-wide text-red-800 mb-2">Troubleshooting Steps:</h4>
+                        <ul className="list-disc pl-5 space-y-1 text-xs">
+                          <li>Check your internet connection</li>
+                          <li>The server might be temporarily unavailable</li>
+                          <li>Try refreshing the page and uploading again</li>
+                          <li>Clear your browser cache and cookies</li>
+                        </ul>
+                      </div>
                     )}
+                    
+                    {/* API endpoints failure troubleshooting */}
+                    {uploadError.includes('Connection to all API endpoints failed') && (
+                      <div className="mt-3 bg-white p-3 rounded border border-red-100">
+                        <h4 className="text-xs font-semibold uppercase tracking-wide text-red-800 mb-2">Troubleshooting Steps:</h4>
+                        <ul className="list-disc pl-5 space-y-1 text-xs">
+                          <li>The backend server may be down or unreachable</li>
+                          <li>Try again in a few minutes</li>
+                          <li>Try using a different browser</li>
+                          <li>If using a VPN or proxy, try disabling it temporarily</li>
+                          <li>Contact support if the issue persists</li>
+                        </ul>
+                        <div className="mt-2 text-xs bg-gray-50 p-2 rounded">
+                          <span className="font-medium">Technical Info:</span> Error code 502 indicates a communication issue between servers
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Server error troubleshooting */}
+                    {uploadError.includes('server encountered an error') && (
+                      <div className="mt-3 bg-white p-3 rounded border border-red-100">
+                        <h4 className="text-xs font-semibold uppercase tracking-wide text-red-800 mb-2">Troubleshooting Steps:</h4>
+                        <ul className="list-disc pl-5 space-y-1 text-xs">
+                          <li>This is a temporary server issue</li>
+                          <li>Wait a few minutes and try again</li>
+                          <li>If the problem persists, contact support</li>
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Retry button */}
+                  <div className="mt-3 flex justify-end">
+                    <button 
+                      type="button"
+                      onClick={() => setUploadError(null)}
+                      className="text-xs px-2 py-1 bg-white border border-gray-300 rounded text-gray-700 hover:bg-gray-50"
+                    >
+                      Dismiss
+                    </button>
                   </div>
                 </div>
               </div>
