@@ -3,11 +3,13 @@ import uuid
 import tempfile
 import shutil
 import re
+import asyncio
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
-import whois
+import whoisit
+import tldextract
 import dns.resolver
 import requests
 import ssl
@@ -141,11 +143,15 @@ class ReportResponse(BaseModel):
 def get_whois_data(domain: str) -> Dict[str, Any]:
     """
     Get domain registration information using RDAP first, then falling back to WHOIS.
+    If both fail to provide complete data, use additional sources to get critical information.
     Returns registrar, creation date, expiration date, domain age, and status.
     """
     import rdap
     from datetime import datetime, timezone
     import re
+    import socket
+    import requests
+    import tldextract
     
     # Initialize result with default values
     result = {
@@ -156,7 +162,8 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
         "status": "Unknown",
         "whois_privacy": "Unknown",
         "name_servers": [],
-        "method_used": None  # Track which method was used for debugging
+        "method_used": None,  # Track which method was used for debugging
+        "data_sources": []    # Track which data sources contributed to the result
     }
     
     # Helper function to safely convert any date to string format
@@ -171,7 +178,31 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
                 logger.warning(f"Error formatting datetime: {e}")
                 return "Unknown"
         elif isinstance(date_value, str):
-            return date_value
+            # Try to parse the date string and remove the time component
+            try:
+                # Check if this is an ISO format date with time
+                if 'T' in date_value or ' ' in date_value:
+                    # Try to parse the date with various formats
+                    formats = [
+                        "%Y-%m-%dT%H:%M:%SZ",
+                        "%Y-%m-%dT%H:%M:%S.%fZ",
+                        "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%d %H:%M:%S.%f"
+                    ]
+                    
+                    for fmt in formats:
+                        try:
+                            parsed_date = datetime.strptime(date_value, fmt)
+                            return parsed_date.strftime("%Y-%m-%d")
+                        except ValueError:
+                            continue
+                            
+                # If we couldn't parse it or it doesn't have a time component, return as is
+                return date_value
+            except Exception as e:
+                logger.warning(f"Error parsing date string: {e}")
+                return date_value
         else:
             try:
                 return str(date_value)
@@ -273,104 +304,173 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error cleaning domain: {e}")
     
+    # Extract domain components for additional lookups
+    extracted = tldextract.extract(domain)
+    tld = extracted.suffix
+    
     # Try RDAP first
     rdap_success = False
     try:
         logger.info(f"Attempting RDAP lookup for {domain}")
-        client = rdap.client.RdapClient()
-        rdap_data = client.get_domain(domain)
         
-        # Extract registrar
+        # Try whoisit library first as an alternative RDAP client
         try:
-            if hasattr(rdap_data, 'entities') and rdap_data.entities:
-                for entity in rdap_data.entities:
-                    if entity.role and 'registrar' in entity.role:
-                        result["registrar"] = entity.name
-                        break
-        except Exception as e:
-            logger.warning(f"Error extracting registrar from RDAP: {e}")
+            # Bootstrap whoisit if needed
+            if not whoisit.is_bootstrapped():
+                whoisit.bootstrap()
+                
+            # Perform domain lookup using whoisit
+            whoisit_data = whoisit.domain(domain)
+            
+            if whoisit_data:
+                logger.info(f"Successfully retrieved whoisit RDAP data for {domain}")
+                result["method_used"] = "RDAP (whoisit)"
+                result["data_sources"].append("RDAP (whoisit)")
+                
+                # Extract registrar information
+                if whoisit_data.get("entities", {}).get("registrar"):
+                    registrars = whoisit_data["entities"]["registrar"]
+                    if registrars and len(registrars) > 0:
+                        result["registrar"] = registrars[0].get("name", "Unknown")
+                
+                # Extract creation date
+                if whoisit_data.get("registration_date"):
+                    result["creation_date"] = whoisit_data["registration_date"]
+                
+                # Extract expiration date
+                if whoisit_data.get("expiration_date"):
+                    result["expiration_date"] = whoisit_data["expiration_date"]
+                
+                # Extract status
+                if whoisit_data.get("status"):
+                    result["status"] = whoisit_data["status"]
+                
+                # Extract nameservers
+                if whoisit_data.get("nameservers"):
+                    result["name_servers"] = whoisit_data["nameservers"]
+                
+                rdap_success = True
+                
+        except Exception as whoisit_error:
+            logger.warning(f"whoisit RDAP lookup failed for {domain}: {whoisit_error}")
+            # Continue to standard RDAP lookup
         
-        # Extract dates
-        try:
-            if hasattr(rdap_data, 'events') and rdap_data.events:
-                for event in rdap_data.events:
-                    if event.action == 'registration':
-                        result["creation_date"] = event.date
-                    elif event.action == 'expiration':
-                        result["expiration_date"] = event.date
-        except Exception as e:
-            logger.warning(f"Error extracting dates from RDAP: {e}")
-        
-        # Extract status
-        try:
-            if hasattr(rdap_data, 'status') and rdap_data.status:
-                result["status"] = clean_domain_status(rdap_data.status)
-        except Exception as e:
-            logger.warning(f"Error extracting status from RDAP: {e}")
-        
-        # Extract nameservers
-        try:
-            if hasattr(rdap_data, 'nameservers') and rdap_data.nameservers:
-                result["name_servers"] = [ns.name for ns in rdap_data.nameservers]
-        except Exception as e:
-            logger.warning(f"Error extracting nameservers from RDAP: {e}")
-        
-        # Check WHOIS privacy
-        try:
-            result["whois_privacy"] = "Enabled" if not result["registrar"] or "privacy" in result["registrar"].lower() else "Disabled"
-        except Exception as e:
-            logger.warning(f"Error determining WHOIS privacy from RDAP: {e}")
-        
-        result["method_used"] = "RDAP"
-        rdap_success = True
-        logger.info(f"Successfully retrieved RDAP data for {domain}")
+        # Standard RDAP lookup if whoisit failed
+        if not rdap_success:
+            client = rdap.client.RdapClient()
+            rdap_data = client.get_domain(domain)
+            
+            # Extract registrar
+            try:
+                if hasattr(rdap_data, 'entities') and rdap_data.entities:
+                    for entity in rdap_data.entities:
+                        if entity.role and 'registrar' in entity.role:
+                            result["registrar"] = entity.name
+                            break
+                        # Some RDAP servers put registrar info in different roles
+                        elif entity.role and ('registration' in entity.role or 'registry' in entity.role):
+                            if not result["registrar"] or result["registrar"] == "Unknown":
+                                result["registrar"] = entity.name
+            except Exception as e:
+                logger.warning(f"Error extracting registrar from RDAP: {e}")
+            
+            # Extract dates
+            try:
+                if hasattr(rdap_data, 'events') and rdap_data.events:
+                    for event in rdap_data.events:
+                        if event.action == 'registration':
+                            result["creation_date"] = event.date
+                        elif event.action == 'expiration':
+                            result["expiration_date"] = event.date
+                        # Some RDAP servers use different event names
+                        elif event.action == 'created' or event.action == 'registered':
+                            if not result["creation_date"] or result["creation_date"] == "Unknown":
+                                result["creation_date"] = event.date
+                        elif event.action == 'expires' or event.action == 'expiry':
+                            if not result["expiration_date"] or result["expiration_date"] == "Unknown":
+                                result["expiration_date"] = event.date
+            except Exception as e:
+                logger.warning(f"Error extracting dates from RDAP: {e}")
+            
+            # Extract status
+            try:
+                if hasattr(rdap_data, 'status') and rdap_data.status:
+                    result["status"] = clean_domain_status(rdap_data.status)
+            except Exception as e:
+                logger.warning(f"Error extracting status from RDAP: {e}")
+            
+            # Extract nameservers
+            try:
+                if hasattr(rdap_data, 'nameservers') and rdap_data.nameservers:
+                    result["name_servers"] = [ns.name for ns in rdap_data.nameservers]
+            except Exception as e:
+                logger.warning(f"Error extracting nameservers from RDAP: {e}")
+            
+            # Check WHOIS privacy
+            try:
+                result["whois_privacy"] = "Enabled" if not result["registrar"] or "privacy" in result["registrar"].lower() else "Disabled"
+            except Exception as e:
+                logger.warning(f"Error determining WHOIS privacy from RDAP: {e}")
+            
+            result["method_used"] = "RDAP"
+            result["data_sources"].append("RDAP")
+            rdap_success = True
+            logger.info(f"Successfully retrieved RDAP data for {domain}")
         
     except Exception as rdap_error:
         logger.warning(f"RDAP lookup failed for {domain}: {rdap_error}. Falling back to WHOIS.")
     
-    # Fall back to WHOIS if RDAP failed
-    if not rdap_success:
+    # Fall back to WHOIS if RDAP failed or didn't provide complete information
+    whois_success = False
+    whois_data = None
+    if not rdap_success or result["creation_date"] == "Unknown" or result["expiration_date"] == "Unknown":
         try:
             w = whois.whois(domain)
+            whois_data = w
             
             # Extract registrar
             try:
                 if hasattr(w, 'registrar') and w.registrar:
-                    result["registrar"] = w.registrar
+                    if result["registrar"] == "Unknown":  # Only update if RDAP didn't provide it
+                        result["registrar"] = w.registrar
             except Exception as e:
                 logger.warning(f"Error extracting registrar from WHOIS: {e}")
             
             # Extract creation date
             try:
                 if hasattr(w, 'creation_date') and w.creation_date:
-                    if isinstance(w.creation_date, list):
-                        result["creation_date"] = w.creation_date[0]
-                    else:
-                        result["creation_date"] = w.creation_date
+                    if result["creation_date"] == "Unknown":  # Only update if RDAP didn't provide it
+                        if isinstance(w.creation_date, list):
+                            result["creation_date"] = w.creation_date[0]
+                        else:
+                            result["creation_date"] = w.creation_date
             except Exception as e:
                 logger.warning(f"Error extracting creation date from WHOIS: {e}")
             
             # Extract expiration date
             try:
                 if hasattr(w, 'expiration_date') and w.expiration_date:
-                    if isinstance(w.expiration_date, list):
-                        result["expiration_date"] = w.expiration_date[0]
-                    else:
-                        result["expiration_date"] = w.expiration_date
+                    if result["expiration_date"] == "Unknown":  # Only update if RDAP didn't provide it
+                        if isinstance(w.expiration_date, list):
+                            result["expiration_date"] = w.expiration_date[0]
+                        else:
+                            result["expiration_date"] = w.expiration_date
             except Exception as e:
                 logger.warning(f"Error extracting expiration date from WHOIS: {e}")
             
             # Extract status
             try:
                 if hasattr(w, 'status') and w.status:
-                    result["status"] = clean_domain_status(w.status)
+                    if not result["status"] or result["status"] == "Unknown":  # Only update if RDAP didn't provide it
+                        result["status"] = clean_domain_status(w.status)
             except Exception as e:
                 logger.warning(f"Error extracting status from WHOIS: {e}")
             
             # Extract nameservers
             try:
                 if hasattr(w, 'name_servers') and w.name_servers:
-                    result["name_servers"] = w.name_servers
+                    if not result["name_servers"]:  # Only update if RDAP didn't provide it
+                        result["name_servers"] = w.name_servers
             except Exception as e:
                 logger.warning(f"Error extracting nameservers from WHOIS: {e}")
             
@@ -378,16 +478,172 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
             try:
                 has_emails = hasattr(w, 'emails') and w.emails
                 has_privacy_registrar = hasattr(w, 'registrar') and w.registrar and "privacy" in str(w.registrar).lower()
-                result["whois_privacy"] = "Enabled" if not has_emails or has_privacy_registrar else "Disabled"
+                if result["whois_privacy"] == "Unknown":  # Only update if RDAP didn't provide it
+                    result["whois_privacy"] = "Enabled" if not has_emails or has_privacy_registrar else "Disabled"
             except Exception as e:
                 logger.warning(f"Error determining WHOIS privacy from WHOIS: {e}")
             
-            result["method_used"] = "WHOIS"
+            if not result["method_used"]:  # Only update if RDAP didn't succeed
+                result["method_used"] = "WHOIS"
+            result["data_sources"].append("WHOIS")
+            whois_success = True
             logger.info(f"Successfully retrieved WHOIS data for {domain}")
             
         except Exception as whois_error:
-            logger.error(f"Both RDAP and WHOIS lookups failed for {domain}. RDAP error: {rdap_error if 'rdap_error' in locals() else 'Unknown'}. WHOIS error: {whois_error}")
-            result["error"] = f"Domain information lookup failed: {str(whois_error)}"
+            logger.warning(f"WHOIS lookup failed for {domain}: {whois_error}")
+            if not rdap_success:
+                logger.error(f"Both RDAP and WHOIS lookups failed for {domain}.")
+    
+    
+    # If we still don't have creation date or expiration date, try additional sources
+    if result["creation_date"] == "Unknown" or result["expiration_date"] == "Unknown":
+        # Try WHOIS server directly for specific TLDs
+        try:
+            if tld in ["com", "net", "org", "info", "biz", "us"]:
+                logger.info(f"Trying direct WHOIS server query for {domain} with TLD: {tld}")
+                import socket
+                
+                # Use the correct WHOIS server for each TLD
+                if tld == "us":
+                    whois_server = "whois.nic.us"
+                elif tld in ["com", "net"]:
+                    whois_server = "whois.verisign-grs.com"
+                else:
+                    whois_server = f"whois.{tld}"
+                    
+                logger.info(f"Using WHOIS server: {whois_server} for {domain}")
+                
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect((whois_server, 43))
+                s.send((domain + "\r\n").encode())
+                response = b""
+                while True:
+                    data = s.recv(4096)
+                    if not data:
+                        break
+                    response += data
+                s.close()
+                
+                whois_text = response.decode("utf-8", errors="ignore")
+                logger.debug(f"WHOIS response for {domain}: {whois_text[:500]}...")
+                
+                # Different TLDs use different formats for dates
+                if tld == "us":
+                    # .US specific date formats
+                    if result["creation_date"] == "Unknown":
+                        # Try multiple patterns for .US domains
+                        creation_patterns = [
+                            r"Created Date:\s*(.+)",
+                            r"Domain Registration Date:\s*(.+)",
+                            r"Creation Date:\s*(.+)"
+                        ]
+                        
+                        for pattern in creation_patterns:
+                            creation_match = re.search(pattern, whois_text, re.IGNORECASE)
+                            if creation_match:
+                                result["creation_date"] = creation_match.group(1).strip()
+                                result["data_sources"].append("Direct WHOIS (.US)")
+                                break
+                    
+                    if result["expiration_date"] == "Unknown":
+                        # Try multiple patterns for .US domains
+                        expiration_patterns = [
+                            r"Expiration Date:\s*(.+)",
+                            r"Domain Expiration Date:\s*(.+)",
+                            r"Registry Expiry Date:\s*(.+)"
+                        ]
+                        
+                        for pattern in expiration_patterns:
+                            expiration_match = re.search(pattern, whois_text, re.IGNORECASE)
+                            if expiration_match:
+                                result["expiration_date"] = expiration_match.group(1).strip()
+                                result["data_sources"].append("Direct WHOIS (.US)")
+                                break
+                    
+                    # Extract registrar for .US domains
+                    if result["registrar"] == "Unknown":
+                        registrar_patterns = [
+                            r"Registrar:\s*(.+)",
+                            r"Sponsoring Registrar:\s*(.+)"
+                        ]
+                        
+                        for pattern in registrar_patterns:
+                            registrar_match = re.search(pattern, whois_text, re.IGNORECASE)
+                            if registrar_match:
+                                result["registrar"] = registrar_match.group(1).strip()
+                                result["data_sources"].append("Direct WHOIS (.US)")
+                                break
+                    
+                    # Extract nameservers for .US domains
+                    if not result["name_servers"]:
+                        ns_matches = re.findall(r"Name Server:\s*(.+)", whois_text, re.IGNORECASE)
+                        if ns_matches:
+                            result["name_servers"] = [ns.strip() for ns in ns_matches]
+                            result["data_sources"].append("Direct WHOIS (.US)")
+                    
+                    # Extract status for .US domains
+                    if result["status"] == "Unknown":
+                        status_patterns = [
+                            r"Domain Status:\s*(.+)",
+                            r"Status:\s*(.+)",
+                            r"State:\s*(.+)"
+                        ]
+                        
+                        all_statuses = []
+                        for pattern in status_patterns:
+                            status_matches = re.findall(pattern, whois_text, re.IGNORECASE)
+                            if status_matches:
+                                for status in status_matches:
+                                    clean_status = status.strip().split(' ')[0]  # Get just the status code
+                                    if clean_status and clean_status not in all_statuses:
+                                        all_statuses.append(clean_status)
+                        
+                        if all_statuses:
+                            result["status"] = all_statuses
+                            result["data_sources"].append("Direct WHOIS (.US)")
+                else:
+                    # Standard patterns for other TLDs
+                    if result["creation_date"] == "Unknown":
+                        creation_match = re.search(r"Creation Date:\s*(.+)", whois_text, re.IGNORECASE)
+                        if creation_match:
+                            result["creation_date"] = creation_match.group(1).strip()
+                            result["data_sources"].append("Direct WHOIS")
+                    
+                    if result["expiration_date"] == "Unknown":
+                        expiration_match = re.search(r"Registry Expiry Date:\s*(.+)", whois_text, re.IGNORECASE)
+                        if expiration_match:
+                            result["expiration_date"] = expiration_match.group(1).strip()
+                            result["data_sources"].append("Direct WHOIS")
+                
+                logger.info(f"Direct WHOIS query completed for {domain} with results: creation_date={result['creation_date']}, expiration_date={result['expiration_date']}, registrar={result['registrar']}")
+        except Exception as direct_whois_error:
+            logger.warning(f"Direct WHOIS server query failed for {domain}: {direct_whois_error}")
+    
+    # Try DNS SOA record for an estimation of domain creation
+    if result["creation_date"] == "Unknown":
+        try:
+            logger.info(f"Trying DNS SOA record for {domain}")
+            import dns.resolver
+            answers = dns.resolver.resolve(domain, 'SOA')
+            for rdata in answers:
+                # SOA serial can sometimes give a clue about creation date
+                serial = rdata.serial
+                if serial > 20000000:  # Likely a date-based serial (YYYYMMDDNN)
+                    year = serial // 10000000
+                    if 1990 <= year <= datetime.now().year:  # Sanity check for reasonable years
+                        month = (serial // 100000) % 100
+                        day = (serial // 1000) % 100
+                        if 1 <= month <= 12 and 1 <= day <= 31:  # Valid date
+                            estimated_date = datetime(year, month, day, tzinfo=timezone.utc)
+                            result["creation_date"] = estimated_date
+                            result["creation_date_note"] = "Estimated from DNS SOA serial"
+                            result["data_sources"].append("DNS SOA")
+                            logger.info(f"Estimated creation date from SOA serial: {estimated_date}")
+                            break
+        except Exception as soa_error:
+            logger.warning(f"DNS SOA lookup failed for {domain}: {soa_error}")
+    
+    # We're removing the TLD launch date fallback as requested to avoid confusion
     
     # Format dates and calculate domain age
     try:
@@ -400,8 +656,42 @@ def get_whois_data(domain: str) -> Dict[str, Any]:
         # Calculate domain age based on creation date
         if result["creation_date"] and result["creation_date"] != "Unknown":
             result["domain_age"] = calculate_domain_age(result["creation_date"])
+            
+            # We're not using estimated dates anymore
     except Exception as e:
         logger.error(f"Error formatting dates or calculating domain age: {e}")
+    
+    # If we still don't have any data, try one more fallback for .US domains
+    if tld == "us" and (result["creation_date"] == "Unknown" or result["expiration_date"] == "Unknown"):
+        try:
+            logger.info(f"Trying additional fallback for .US domain: {domain}")
+            # Use python-whois with explicit server for .US domains
+            import whois
+            w = whois.query(domain, force=True)
+            
+            if w:
+                if result["creation_date"] == "Unknown" and hasattr(w, 'creation_date') and w.creation_date:
+                    result["creation_date"] = w.creation_date
+                    result["data_sources"].append("WHOIS Fallback (.US)")
+                
+                if result["expiration_date"] == "Unknown" and hasattr(w, 'expiration_date') and w.expiration_date:
+                    result["expiration_date"] = w.expiration_date
+                    result["data_sources"].append("WHOIS Fallback (.US)")
+                    
+                if result["registrar"] == "Unknown" and hasattr(w, 'registrar') and w.registrar:
+                    result["registrar"] = w.registrar
+                    result["data_sources"].append("WHOIS Fallback (.US)")
+                    
+                logger.info(f"Additional .US fallback successful for {domain}")
+        except Exception as us_fallback_error:
+            logger.warning(f"Additional .US fallback failed for {domain}: {us_fallback_error}")
+    
+    # If we still don't have any data, set an error
+    if (not rdap_success and not whois_success and 
+        result["creation_date"] == "Unknown" and 
+        result["expiration_date"] == "Unknown" and
+        not result["name_servers"]):
+        result["error"] = "Domain information lookup failed through all available methods"
     
     return result
 
@@ -476,8 +766,109 @@ def get_ssl_info(domain: str) -> Dict[str, Any]:
             "error": str(e)
         }
 
-async def get_virustotal_data(domain: str) -> Dict[str, Any]:
-    """Get VirusTotal information for a domain."""
+async def submit_url_to_virustotal(url: str) -> Dict[str, Any]:
+    """Submit a URL to VirusTotal for scanning.
+    
+    Args:
+        url: The URL to scan (should include http:// or https://)
+        
+    Returns:
+        Dictionary with scan results or error information
+    """
+    if not VIRUSTOTAL_API_KEY:
+        logger.error("VirusTotal API key is not available for URL submission.")
+        return {"error": "VirusTotal API key not configured"}
+    
+    # Ensure URL has a scheme
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = f"https://{url}"
+    
+    logger.info(f"Attempting to submit URL to VirusTotal: {url}")
+    client = None
+    try:
+        # Initialize the VirusTotal client
+        client = vt.Client(VIRUSTOTAL_API_KEY)
+        logger.info("VirusTotal client initialized successfully for URL submission.")
+        
+        try:
+            # Generate the URL identifier
+            url_id = vt.url_id(url)
+            logger.info(f"Generated URL ID for {url}: {url_id}")
+            
+            # Submit the URL for analysis
+            try:
+                logger.info(f"Submitting URL to VirusTotal: {url}")
+                await client.scan_url_async(url)
+                logger.info(f"Successfully submitted URL for scanning: {url}")
+            except Exception as scan_error:
+                logger.error(f"Error during VirusTotal scan_url_async: {scan_error}", exc_info=True)
+                return {"error": f"Failed to submit URL for scanning: {str(scan_error)}"}
+            
+            # Wait a moment for the scan to start processing
+            try:
+                logger.info("Waiting for scan to initialize...")
+                await asyncio.sleep(2)
+                logger.info("Wait completed, attempting to retrieve initial results")
+            except Exception as sleep_error:
+                logger.error(f"Error during asyncio.sleep: {sleep_error}", exc_info=True)
+                # Continue despite sleep error - we can still try to get results
+            
+            # Try to get the initial analysis results
+            try:
+                logger.info(f"Retrieving initial analysis for URL ID: {url_id}")
+                analysis = await client.get_object_async(f"/urls/{url_id}")
+                last_analysis_stats = analysis.get("last_analysis_stats", {})
+                last_analysis_date = analysis.get("last_analysis_date")
+                
+                logger.info(f"Retrieved initial analysis stats: {last_analysis_stats}")
+                
+                result = {
+                    "success": True,
+                    "message": "URL submitted for scanning",
+                    "url": url,
+                    "last_analysis_stats": last_analysis_stats,
+                    "last_analysis_date": last_analysis_date,
+                    "scan_id": url_id
+                }
+            except Exception as analysis_error:
+                logger.warning(f"Could not retrieve initial analysis results: {analysis_error}")
+                # If we can't get results yet, that's okay - scanning might take time
+                result = {
+                    "success": True,
+                    "message": "URL submitted for scanning. Results may take a few minutes to process.",
+                    "url": url,
+                    "scan_id": url_id
+                }
+            
+            logger.info(f"Returning scan submission result for {url}")
+            return result
+            
+        except Exception as url_error:
+            logger.error(f"Error processing URL {url}: {url_error}", exc_info=True)
+            return {"error": f"Error processing URL: {str(url_error)}"}
+        
+    except Exception as client_error:
+        logger.error(f"Error initializing VirusTotal client: {client_error}", exc_info=True)
+        return {"error": f"Failed to initialize VirusTotal client: {str(client_error)}"}
+    finally:
+        if client:
+            try:
+                logger.info("Closing VirusTotal client")
+                await client.close()
+                logger.info("VirusTotal client closed successfully")
+            except Exception as close_error:
+                logger.error(f"Error closing VirusTotal client: {close_error}", exc_info=True)
+
+async def get_virustotal_data(domain: str, force_scan: bool = False) -> Dict[str, Any]:
+    """Get VirusTotal information for a domain.
+    
+    Args:
+        domain: The domain to look up
+        force_scan: If True, submit the domain for a fresh scan before retrieving results
+        
+    Returns:
+        Dictionary containing VirusTotal data
+    """
     if not VIRUSTOTAL_API_KEY:
         logger.error("VirusTotal API key is not available at get_virustotal_data call time.")
         return {"error": "VirusTotal API key not configured"}
@@ -499,6 +890,21 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
 
     # If client initialization was successful, proceed to make the API call
     try:
+        # If force_scan is True, submit the domain for a fresh scan first
+        if force_scan:
+            logger.info(f"Force scan requested for domain: {domain}")
+            # Submit the domain URL for scanning
+            url = f"https://{domain}"
+            url_id = vt.url_id(url)
+            await client.scan_url_async(url)
+            logger.info(f"Successfully submitted domain for forced scanning: {domain}")
+            
+            # Wait a moment for the scan to start processing
+            await asyncio.sleep(3)
+            
+            # Note: We continue with the regular domain lookup as the scan may take time to complete
+            # The next analysis will show the updated results once they're available
+        
         logger.info(f"Making VirusTotal API request for domain: {domain}")
         domain_obj = await client.get_object_async(f"/domains/{domain}")
         
@@ -519,45 +925,45 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
         # Get categories if available
         categories = domain_obj.get("categories", {})
         
-        # Get last analysis date and format it
+        # Get last analysis date and convert it to a Unix timestamp (seconds since epoch)
         raw_vt_date = domain_obj.get("last_analysis_date")
-        formatted_date = None
+        timestamp_value = None
 
         try:
-            # First, handle the case where raw_vt_date is already an integer
+            # First, handle the case where raw_vt_date is already an integer (Unix timestamp)
             if isinstance(raw_vt_date, int) and raw_vt_date > 0:
-                formatted_date = datetime.fromtimestamp(raw_vt_date, tz=timezone.utc).isoformat()
-                logger.info(f"Successfully parsed VirusTotal date from integer timestamp: {raw_vt_date}")
-            # Next, handle the case where raw_vt_date is a string that can be converted to an integer
+                timestamp_value = raw_vt_date
+                logger.info(f"Successfully used existing VirusTotal timestamp: {raw_vt_date}")
+            # Next, handle the case where raw_vt_date is a string
             elif isinstance(raw_vt_date, str) and raw_vt_date.strip():
                 # Try to parse as ISO format string first
                 try:
-                    # If it's already in ISO format, parse it directly
+                    # If it's in ISO format, convert to Unix timestamp
                     parsed_date = datetime.fromisoformat(raw_vt_date.replace('Z', '+00:00'))
-                    formatted_date = parsed_date.isoformat()
-                    logger.info(f"Successfully parsed VirusTotal date from ISO format string: {raw_vt_date}")
+                    timestamp_value = int(parsed_date.timestamp())
+                    logger.info(f"Successfully converted ISO date to timestamp: {raw_vt_date} -> {timestamp_value}")
                 except ValueError:
-                    # If not ISO format, try to convert to integer timestamp
+                    # If not ISO format, try to convert directly to integer timestamp
                     try:
                         timestamp_int = int(raw_vt_date)
                         if timestamp_int > 0:
-                            formatted_date = datetime.fromtimestamp(timestamp_int, tz=timezone.utc).isoformat()
-                            logger.info(f"Successfully parsed VirusTotal date from string numeric timestamp: {raw_vt_date}")
+                            timestamp_value = timestamp_int
+                            logger.info(f"Successfully parsed VirusTotal timestamp from string: {raw_vt_date}")
                         else:
-                            logger.info(f"VirusTotal timestamp '{raw_vt_date}' converted to non-positive integer: {timestamp_int}, using current time")
-                            formatted_date = datetime.now(tz=timezone.utc).isoformat()
+                            logger.info(f"VirusTotal timestamp '{raw_vt_date}' is non-positive: {timestamp_int}, using current time")
+                            timestamp_value = int(datetime.now(tz=timezone.utc).timestamp())
                     except ValueError:
-                        logger.info(f"VirusTotal last_analysis_date is not a valid ISO format or integer: '{raw_vt_date}', using current time")
-                        formatted_date = datetime.now(tz=timezone.utc).isoformat()
+                        logger.info(f"VirusTotal last_analysis_date is not a valid format: '{raw_vt_date}', using current time")
+                        timestamp_value = int(datetime.now(tz=timezone.utc).timestamp())
             elif raw_vt_date is None or raw_vt_date == "":
                 logger.info("VirusTotal last_analysis_date is None or empty, using current time")
-                formatted_date = datetime.now(tz=timezone.utc).isoformat()
+                timestamp_value = int(datetime.now(tz=timezone.utc).timestamp())
             else:
                 logger.info(f"VirusTotal last_analysis_date is of unexpected type: {type(raw_vt_date).__name__}, using current time")
-                formatted_date = datetime.now(tz=timezone.utc).isoformat()
+                timestamp_value = int(datetime.now(tz=timezone.utc).timestamp())
         except Exception as e:
             logger.info(f"Error parsing VirusTotal date: {e}, using current time")
-            formatted_date = datetime.now(tz=timezone.utc).isoformat()
+            timestamp_value = int(datetime.now(tz=timezone.utc).timestamp())
         
         # Build the result
         result = {
@@ -568,7 +974,7 @@ async def get_virustotal_data(domain: str) -> Dict[str, Any]:
             "total_engines": sum(last_analysis_stats.values()),
             "detections": detections,
             "categories": categories,
-            "last_analysis_date": formatted_date # Use the parsed date (or None if parsing failed)
+            "last_analysis_date": timestamp_value  # Use the Unix timestamp value
         }
         
         logger.info(f"Successfully retrieved VirusTotal data for {domain} with {result['malicious_count']} malicious detections")
@@ -1233,6 +1639,105 @@ def generate_pdf_report(analysis_data: Dict[str, Any], image_path: Optional[str]
     return str(pdf_path)
 
 # API Routes
+
+# Match the pattern of other working endpoints
+@app.post("/virustotal/force-scan")
+@app.post("/api/virustotal/force-scan")
+@app.options("/virustotal/force-scan")
+@app.options("/api/virustotal/force-scan")
+async def force_virustotal_scan(request: Request):
+    """
+    Force a new VirusTotal scan for a domain.
+    
+    Expects a JSON body with:
+    - domain: The domain to scan
+    
+    Returns the scan submission result.
+    """
+    # Log the request method and headers for debugging
+    request_id = str(uuid.uuid4())[:8]  # Generate a short request ID for tracking
+    logger.info(f"[{request_id}] Received force scan request: {request.method} {request.url}")
+    logger.info(f"[{request_id}] Request headers: {dict(request.headers)}")
+    
+    # Handle OPTIONS requests for CORS preflight
+    if request.method == "OPTIONS":
+        logger.info(f"[{request_id}] Handling OPTIONS preflight request")
+        return JSONResponse(
+            status_code=200,
+            content={"detail": "OK"}
+        )
+    
+    try:
+        # Get the request body
+        try:
+            data = await request.json()
+            logger.info(f"[{request_id}] Request body: {data}")
+            domain = data.get("domain")
+        except Exception as json_err:
+            logger.error(f"[{request_id}] Error parsing JSON: {json_err}", exc_info=True)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": f"Invalid JSON: {str(json_err)}",
+                    "request_id": request_id
+                }
+            )
+        
+        if not domain:
+            logger.error(f"[{request_id}] Missing domain parameter")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Domain is required",
+                    "request_id": request_id
+                }
+            )
+        
+        # Validate domain format
+        if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$', domain):
+            logger.error(f"[{request_id}] Invalid domain format: {domain}")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": f"Invalid domain format: {domain}",
+                    "request_id": request_id
+                }
+            )
+        
+        logger.info(f"[{request_id}] Submitting domain for VirusTotal scanning: {domain}")
+        
+        # Submit the domain for scanning
+        url = f"https://{domain}"
+        scan_result = await submit_url_to_virustotal(url)
+        
+        # Add request tracking information
+        scan_result["request_id"] = request_id
+        
+        # Add a message to indicate the scan was requested
+        if "error" not in scan_result:
+            scan_result["message"] = "Scan requested successfully. Results will be available in a few minutes."
+            logger.info(f"[{request_id}] Successfully submitted domain for scanning: {domain}")
+            return JSONResponse(
+                status_code=200,
+                content=scan_result
+            )
+        else:
+            logger.error(f"[{request_id}] Error from VirusTotal submission: {scan_result['error']}")
+            return JSONResponse(
+                status_code=500,
+                content=scan_result
+            )
+    
+    except Exception as e:
+        logger.error(f"[{request_id}] Unhandled error in force_virustotal_scan: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Failed to submit scan: {str(e)}",
+                "request_id": request_id,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
 
 @app.get("/api/test-openai")
 @app.get("/test-openai")

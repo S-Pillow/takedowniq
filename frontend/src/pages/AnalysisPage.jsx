@@ -52,6 +52,11 @@ export default function AnalysisPage() {
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [scanningVt, setScanningVt] = useState(false);
+  const [scanMessage, setScanMessage] = useState('');
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanTimer, setScanTimer] = useState(null);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [chatgptAnalysis, setChatgptAnalysis] = useState(null);
   const [loadingChatgpt, setLoadingChatgpt] = useState(false);
@@ -89,6 +94,142 @@ export default function AnalysisPage() {
     
     fetchAnalysis();
   }, [uploadId]);
+
+  // Function to force a new VirusTotal scan
+  const handleForceVtScan = async () => {
+    if (!analysis || !analysis.domain || scanningVt) return;
+    
+    try {
+      // Reset and start progress tracking
+      setScanningVt(true);
+      setScanProgress(0);
+      setScanMessage('Submitting domain for scanning...');
+      
+      // Clear any existing timer
+      if (scanTimer) {
+        clearInterval(scanTimer);
+      }
+      
+      // Start the progress simulation
+      const timer = setInterval(() => {
+        setScanProgress(prev => {
+          // Simulate progress up to 90% (the last 10% will be when we get results)
+          if (prev < 90) {
+            // Slow down the progress as it gets higher
+            const increment = prev < 30 ? 10 : prev < 60 ? 5 : 2;
+            return Math.min(prev + increment, 90);
+          }
+          return prev;
+        });
+      }, 1000);
+      
+      setScanTimer(timer);
+      
+      // Make the API call with proper headers
+      const apiConfig = {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
+      };
+      
+      // Log the API request for debugging
+      console.log(`Attempting to force scan domain: ${analysis.domain}`);
+      
+      // Try multiple API paths to handle both development and production environments
+      let response;
+      const apiEndpoints = [
+        '/tools/takedowniq/api/virustotal/force-scan',  // Production path with proxy
+        '/virustotal/force-scan',                       // Direct backend path
+        '/api/virustotal/force-scan'                    // Standard API path
+      ];
+      
+      let lastError = null;
+      
+      // Try each endpoint until one works
+      for (const endpoint of apiEndpoints) {
+        try {
+          console.log(`Trying API endpoint: ${endpoint}`);
+          response = await axios.post(endpoint, {
+            domain: analysis.domain
+          }, apiConfig);
+          console.log(`API endpoint succeeded: ${endpoint}`);
+          // If we get here, the request was successful
+          break;
+        } catch (error) {
+          console.log(`Error with endpoint ${endpoint}: ${error.message}`);
+          console.log(error.response ? `Status: ${error.response.status}` : 'No response');
+          lastError = error;
+          // Continue to the next endpoint
+        }
+      }
+      
+      // If we've tried all endpoints and none worked, throw the last error
+      if (!response) {
+        console.log('All API endpoints failed');
+        throw lastError;
+      }
+      
+      if (response.data.error) {
+        clearInterval(timer);
+        setScanMessage(`Error: ${response.data.error}`);
+        setScanProgress(0);
+      } else {
+        setScanMessage(
+          'Scan requested successfully! Results will be available in a few minutes. ' +
+          'Please refresh the page after a few minutes to see updated results.'
+        );
+        
+        // Set progress to 95% to indicate scan was submitted successfully
+        setScanProgress(95);
+        
+        // Set a timeout to refresh the analysis data after 10 seconds
+        // This won't show the complete scan results yet, but might show scan in progress
+        setTimeout(async () => {
+          try {
+            const refreshResponse = await axios.get(`/api/analysis/${uploadId}`);
+            setAnalysis(refreshResponse.data);
+            setScanProgress(100); // Complete the progress bar
+            
+            // Keep the progress bar visible for a moment before hiding
+            setTimeout(() => {
+              setScanningVt(false);
+              clearInterval(timer);
+              setScanTimer(null);
+            }, 2000);
+          } catch (err) {
+            console.error('Error refreshing analysis:', err);
+            setScanProgress(100); // Complete the progress bar anyway
+            
+            setTimeout(() => {
+              setScanningVt(false);
+              clearInterval(timer);
+              setScanTimer(null);
+            }, 2000);
+          }
+        }, 10000);
+      }
+    } catch (err) {
+      setScanMessage(`Error: ${err.message || 'Failed to request scan'}`);
+      setScanProgress(0);
+      if (scanTimer) {
+        clearInterval(scanTimer);
+        setScanTimer(null);
+      }
+      setTimeout(() => {
+        setScanningVt(false);
+      }, 3000);
+    }
+  };
+  
+  // Clean up the timer when component unmounts
+  useEffect(() => {
+    return () => {
+      if (scanTimer) {
+        clearInterval(scanTimer);
+      }
+    };
+  }, [scanTimer]);
 
   const fetchChatGPTImpact = async () => {
     try {
@@ -506,12 +647,58 @@ export default function AnalysisPage() {
 
             {/* VirusTotal Results */}
             <div className="card">
-              <h2 className="text-xl font-semibold mb-4 flex items-center">
-                <span>VirusTotal Results</span>
-                {analysis.virustotal_data && analysis.virustotal_data.malicious_count > 0 && (
-                  <span className="ml-2 badge badge-red">Threats Detected</span>
-                )}
+              <h2 className="text-xl font-semibold mb-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center">
+                    <span>VirusTotal Results</span>
+                    {analysis.virustotal_data && analysis.virustotal_data.malicious_count > 0 && (
+                      <span className="ml-2 badge badge-red">Threats Detected</span>
+                    )}
+                  </div>
+                  <button 
+                    onClick={handleForceVtScan}
+                    disabled={scanningVt}
+                    className={`px-3 py-1 text-sm rounded-md ${scanningVt ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 text-white'}`}
+                  >
+                    {scanningVt ? 'Scanning...' : 'Force New Scan'}
+                  </button>
+                </div>
               </h2>
+              
+              {scanMessage && (
+                <div className={`mb-4 p-3 rounded-md text-sm ${scanMessage.includes('Error') ? 'bg-red-50 border border-red-200 text-red-800' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
+                  <div className="flex items-start">
+                    {scanMessage.includes('Error') ? (
+                      <svg className="h-5 w-5 text-red-400 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                      </svg>
+                    ) : (
+                      <svg className="h-5 w-5 text-blue-400 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                    <div>
+                      {scanMessage}
+                      {scanMessage.includes('Error') && (
+                        <div className="mt-2 text-xs text-red-600">
+                          Try again in a few moments or check the domain name for typos.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {scanningVt && (
+                    <div className="mt-3">
+                      <div className="w-full bg-gray-200 rounded-full h-2.5 mb-1">
+                        <div 
+                          className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" 
+                          style={{ width: `${scanProgress}%` }}
+                        ></div>
+                      </div>
+                      <div className="text-xs text-gray-600 text-right">{scanProgress}% complete</div>
+                    </div>
+                  )}
+                </div>
+              )}
               
               {analysis.virustotal_data ? (
                 <div className="space-y-4">
@@ -631,8 +818,62 @@ export default function AnalysisPage() {
                 </div>
               </div>
               
+              {/* Risk Assessment Summary */}
+              <div className="mb-4 p-4 bg-gray-50 rounded-lg border-l-4 border-gray-300">
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Risk Assessment Summary</h3>
+                <p className="text-sm text-gray-700">
+                  {analysis.risk_summary || 
+                    (analysis.risk_score >= 80 ? 'High risk domain with multiple security concerns' :
+                     analysis.risk_score >= 50 ? 'Medium risk domain with some suspicious indicators' :
+                     analysis.risk_score >= 20 ? 'Low risk domain with minimal concerns' :
+                     'Minimal risk domain with no detected security issues')}
+                </p>
+              </div>
+              
+              {/* Security Vendor Information */}
+              <div className="mb-4">
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Security Vendor Assessment</h3>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  {analysis.virustotal_data && analysis.virustotal_data.malicious_count > 0 ? (
+                    <div className="flex items-start">
+                      <ShieldExclamationIcon className="h-5 w-5 text-red-500 mr-2 flex-shrink-0" />
+                      <span className="text-sm text-gray-700">
+                        Domain flagged by {analysis.virustotal_data.malicious_count} security vendors
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-start">
+                      <CheckCircleIcon className="h-5 w-5 text-green-500 mr-2 flex-shrink-0" />
+                      <span className="text-sm text-gray-700">
+                        No security vendors have flagged this domain as malicious
+                      </span>
+                    </div>
+                  )}
+                  
+                  {/* Domain Age Information */}
+                  <div className="mt-3 flex items-start">
+                    <CalendarIcon className="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" />
+                    <span className="text-sm text-gray-700">
+                      {analysis.whois_data && analysis.whois_data.domain_age ? 
+                        `Domain age: ${analysis.whois_data.domain_age}` : 
+                        'Domain age: Unknown'}
+                    </span>
+                  </div>
+                  
+                  {/* SSL Certificate Information */}
+                  <div className="mt-3 flex items-start">
+                    <LockClosedIcon className="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" />
+                    <span className="text-sm text-gray-700">
+                      {analysis.ssl_data && analysis.ssl_data.is_valid ? 
+                        'Valid SSL certificate detected' : 
+                        'No valid SSL certificate detected'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              
               {/* Risk Factors */}
-              {analysis.risk_factors && analysis.risk_factors.length > 0 && (
+              {analysis.risk_factors && analysis.risk_factors.length > 0 ? (
                 <div>
                   <h3 className="text-sm font-medium text-gray-700 mb-2">Risk Factors</h3>
                   <ul className="space-y-1">
@@ -647,8 +888,17 @@ export default function AnalysisPage() {
                         </span>
                       </li>
                     ))}
-
                   </ul>
+                </div>
+              ) : (
+                <div>
+                  <h3 className="text-sm font-medium text-gray-700 mb-2">Risk Factors</h3>
+                  <div className="flex items-start">
+                    <CheckCircleIcon className="h-5 w-5 text-green-500 mr-2 flex-shrink-0" />
+                    <span className="text-sm text-gray-700">
+                      No specific risk factors detected for this domain
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
